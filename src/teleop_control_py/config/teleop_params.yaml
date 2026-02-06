@@ -1,0 +1,75 @@
+teleop_control_node:
+  ros__parameters:
+    # 话题配置
+    image_topic: "/camera/camera/color/image_raw"   # 输入 RGB 图像
+    depth_topic: "/camera/camera/aligned_depth_to_color/image_raw"      # 对齐彩色的深度
+    camera_info_topic: "/camera/camera/aligned_depth_to_color/camera_info"  # 对齐深度的内参
+    robot_pose_topic: "/tcp_pose_broadcaster/pose"  # 当前 TCP 位姿
+    target_pose_topic: "/target_pose"               # 输出目标 TCP 位姿
+    target_frame_id: "base"                         # 目标位姿所在坐标系（建议与robot_pose_topic一致）
+    gripper_cmd_topic: "/gripper/cmd"               # 输出夹爪指令 (0.0~1.0)
+
+    # 手 -> 机器人调节
+    scale_factor: 0.5          # 手腕位移缩放系数
+    axis_mapping: [0, 1, 2]    # 轴映射，手轴到机轴的排列，如 [0,2,1] 交换 Y/Z
+
+    # 滤波与检测
+    smoothing_alpha: 0.2       # 指数低通系数，越小越平滑
+    pinch_threshold_px: 45.0   # 捏合判定阈值 (Deadman 手势)
+
+    # 夹爪映射：拇指-食指距离(px) -> 夹爪开合
+    gripper_open_dist_px: 100.0   # 距离大于此值视为张开 (0.0)
+    gripper_close_dist_px: 20.0   # 距离小于此值视为闭合 (1.0)
+    # 夹爪映射（物理距离，单位 m），深度+内参可用时优先
+    gripper_open_dist_m: 0.12     # 物理距离大于此值视为张开
+    gripper_close_dist_m: 0.02    # 物理距离小于此值视为闭合
+    depth_unit_scale: 0.001       # 16UC1 深度像素单位到米的缩放 (RealSense mm->m)
+
+    # 手腕位置来源
+    # - depth: 用深度+内参反投影得到相机系3D坐标(米)
+    # - normalized: 直接用MediaPipe归一化坐标(无米制)
+    # - hybrid: 优先depth，depth不可用时回退normalized（推荐）
+    hand_position_source: "hybrid"
+    depth_min_m: 0.10
+    depth_max_m: 2.00
+    gripper_duration_sec: 0.0     # >0 按持续时间插值闭合；=0 时用 speed_ratio
+    gripper_speed_ratio: 1.0      # duration_sec=0 时生效，速度比例
+    gripper_step: 0.2             # 夹爪分档步长（0~1），默认 0.2
+
+    # Deadman 来源：true=捏合或空格；false=仅空格（安全开关）
+    use_pinch_deadman: false
+    space_deadman_hold_sec: 0.1     # 空格按下后死手保持时间窗口（解决waitKey只触发单帧的问题）
+    gripper_requires_deadman: true  # true 时只有 Deadman(空格) 激活才发布夹爪命令
+
+servo_pose_follower:
+  ros__parameters:
+    target_pose_topic: "/target_pose"
+    servo_twist_topic: "/servo_node/delta_twist_cmds"
+    planning_frame: "base_link"
+    ee_frame: "tool0"
+    linear_gain: 1.5
+    angular_gain: 1.5
+    max_linear_speed: 0.4      # m/s
+    max_angular_speed: 1.2     # rad/s
+    position_deadband: 0.002   # m
+    rotation_deadband: 0.01    # rad
+    command_rate_hz: 100.0
+
+    # 自动启动 Servo / 自动切控制器（避免手动 ros2 service / ros2 control 命令）
+    auto_start_servo: true
+    start_servo_service: "/servo_node/start_servo"
+    auto_switch_controllers: true
+    controller_manager_ns: "/controller_manager"
+    activate_controller: "forward_position_controller"
+    deactivate_controllers: ["scaled_joint_trajectory_controller"]
+    switch_strictness: "strict"   # strict|best_effort
+    startup_retry_period_sec: 1.0
+
+    # 切控制器失败时的兜底：把 Servo 产生的关节位置（Float64MultiArray）打包成 JointTrajectory
+    # 发给 scaled_joint_trajectory_controller（避免改上游 ur_servo.yaml）
+    fallback_bridge_to_scaled_jtc: true
+    fallback_enable_after_failures: 3
+    servo_joint_command_topic: "/forward_position_controller/commands"
+    scaled_jtc_command_topic: "/scaled_joint_trajectory_controller/joint_trajectory"
+    joint_names: ["shoulder_pan_joint", "shoulder_lift_joint", "elbow_joint", "wrist_1_joint", "wrist_2_joint", "wrist_3_joint"]
+    fallback_point_time_sec: 0.10

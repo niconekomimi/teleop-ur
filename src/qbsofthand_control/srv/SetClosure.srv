@@ -1,0 +1,17 @@
+# Request
+# closure: desired closure ratio [0.0, 1.0]
+float32 closure
+
+# duration_sec: duration-based mode (seconds).
+# - If > 0: interpolate to target in duration_sec seconds (speed comes from duration)
+# - If = 0: speed-based mode (ignore duration), use speed_ratio + max_step_per_tick
+float32 duration_sec
+
+# speed_ratio: speed scale (0.0, 1.0]; smaller is slower.
+# Used only when duration_sec == 0.
+float32 speed_ratio
+
+---
+# Response
+bool success
+string message
