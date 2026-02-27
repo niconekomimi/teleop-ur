@@ -1,0 +1,10 @@
+joy_driver_node:
+  ros__parameters:
+    profile: "auto"          # auto | xbox | ps5 | generic
+    device_path: ""          # 例如: /dev/input/event25; 留空自动发现
+    device_name: ""          # 指定名称优先匹配，如 "Xbox"
+    publish_rate_hz: 100.0
+    deadzone: 0.05
+    autoreconnect: true
+    scan_interval_sec: 1.0
+    use_sim_time: false

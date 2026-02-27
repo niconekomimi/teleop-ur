@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>multi_joy_driver</name>
+  <version>0.1.0</version>
+  <description>Extensible ROS2 joystick driver publishing /joy for multiple gamepads (Xbox, PS5, etc.).</description>
+  <maintainer email="rvl@example.com">rvl</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>python3-evdev</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

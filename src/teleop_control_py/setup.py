@@ -9,7 +9,15 @@ setup(
     data_files=[
         ("share/ament_index/resource_index/packages", ["resource/teleop_control_py"]),
         ("share/" + package_name, ["package.xml"]),
-        ("share/" + package_name + "/config", ["config/teleop_params.yaml"]),
+        (
+            "share/" + package_name + "/config",
+            [
+                "config/teleop_params.yaml",
+                "config/teleop_hand_params.yaml",
+                "config/teleop_xbox_params.yaml",
+                "config/data_collector_params.yaml",
+            ],
+        ),
         ("share/" + package_name + "/launch", [
             "launch/teleop_control.launch.py",
             "launch/control_system.launch.py",
@@ -26,6 +34,7 @@ setup(
         "console_scripts": [
             "teleop_control_node = teleop_control_py.teleop_control_node:main",
             "servo_pose_follower = teleop_control_py.servo_pose_follower:main",
+            "data_collector_node = teleop_control_py.data_collector_node:main",
         ],
     },
 )
