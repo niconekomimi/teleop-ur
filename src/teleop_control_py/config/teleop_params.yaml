@@ -1,52 +1,98 @@
 teleop_control_node:
   ros__parameters:
-    # 话题配置
+    # ==========================================================
+    # 1) 模式选择（Strategy）
+    # ==========================================================
+    # hand: 视觉手势（MediaPipe）
+    # xbox: 手柄（/joy）
+    control_mode: "xbox"
+
+    # ==========================================================
+    # 2) 通用话题 / 坐标系
+    # ==========================================================
+    target_frame_id: "base"  # 统一坐标系
+    gripper_cmd_topic: "/gripper/cmd"
+    target_pose_topic: "/target_pose"
+
+    # ==========================================================
+    # 3) Hand 模式（相机 / MediaPipe / 手-臂映射）
+    # ==========================================================
+    # --- 相机输入 ---
     image_topic: "/camera/camera/color/image_raw"
     depth_topic: "/camera/camera/aligned_depth_to_color/image_raw"
     camera_info_topic: "/camera/camera/aligned_depth_to_color/camera_info"
     robot_pose_topic: "/tcp_pose_broadcaster/pose"
-    target_pose_topic: "/target_pose"
-    target_frame_id: "base"          # 修改为 base 以统一坐标系
-    gripper_cmd_topic: "/gripper/cmd"
 
-    # 手 -> 机器人调节
-    scale_factor: 1.0          # 小范围动作更跟手（同样手位移产生更大目标位移）
-    axis_mapping: [0, 1, 2]    # 默认映射
+    # --- 手 -> 机器人位移映射 ---
+    scale_factor: 1.0       # 小范围动作更跟手
+    axis_mapping: [0, 1, 2] # 手坐标轴映射到机器人 XYZ
+    smoothing_alpha: 0.6    # 位移 EMA 滤波（越大越稳，滞后越大）
 
-    # 滤波与检测
-    smoothing_alpha: 0.6       # 更跟手（更小滞后），抖动会略增
+    # --- 手的 3D 位置来源 ---
+    # depth: 严格 3D（深度反投影，单位米）
+    # normalized: 归一化坐标
+    # hybrid: 优先 depth，失败则回退 normalized
+    hand_position_source: "depth"
+    depth_unit_scale: 0.001
+    depth_min_m: 0.10
+    depth_max_m: 2.00
 
-    # 夹爪配置
+    # --- 手的姿态映射 ---
+    orientation_mode: "hand_relative"  # lock | hand_relative
+    # mapping 是 [x,y,z] 分量重排；sign 每轴取反（>0 不反，<0 取反）
+    orientation_axis_mapping: [2, 0, 1]
+    orientation_axis_sign: [-1.0, 1.0, -1.0]
+
+    # --- Hand 模式夹爪（捏合距离）---
     gripper_open_dist_px: 100.0
     gripper_close_dist_px: 20.0
     gripper_open_dist_m: 0.10
     gripper_close_dist_m: 0.01
-    depth_unit_scale: 0.001
-    # 严格 3D：只用深度反投影得到相机坐标系下的真实 XYZ（米）。
-    # 这通常能显著减少“前后移动导致 XY 跟着漂”的视觉耦合（因为像素 u/v 会随深度变化而变化）。
-    hand_position_source: "depth"
-    orientation_mode: "hand_relative" # lock=锁定初始姿态 | hand_relative 跟随手腕旋转
-    # 手腕相对旋转轴映射
-    # mapping 是 [x,y,z] 分量的重排；sign 用于每轴取反（>0 不反，<0 取反）
-    orientation_axis_mapping: [2, 0, 1]
-    orientation_axis_sign: [-1.0, 1.0, -1.0]
-    depth_min_m: 0.10
-    depth_max_m: 2.00
-    
-    # Deadman 开关
-    # 空格 deadman：用 pynput 可以真正检测“按住/松开”，松开即可立即停，不会因 waitKey 丢帧而抖动
-    space_deadman_backend: "pynput"  # pynput|opencv
-    space_deadman_hold_sec: 0.10      # 仅 opencv backend 使用（越小越及时停，但更依赖按键重复）
 
-    # Deadman 滤波：防抖但保持及时停
+    # ==========================================================
+    # 4) Deadman（通用）
+    # ==========================================================
+    # 空格 deadman：pynput 能检测“按住/松开”，松开立即停
+    space_deadman_backend: "pynput"  # pynput|opencv
+    space_deadman_hold_sec: 0.10     # 仅 opencv backend 使用
+
     deadman_filter_enabled: true
     deadman_engage_confirm_sec: 0.03
     deadman_release_confirm_sec: 0.03
     gripper_requires_deadman: true
 
+    # ==========================================================
+    # 5) Xbox 模式（/joy -> TwistStamped）
+    # ==========================================================
+    max_linear_vel: 0.5
+    max_angular_vel: 1.0
+    joy_deadzone: 0.05
+    joy_deadman_enabled: false
+
+    # --- 按键映射 ---
+    deadman_button: -1
+    deadman_axis: 4
+    deadman_axis_threshold: 0.5
+
+    # 夹爪
+    gripper_close_button: 0
+    gripper_open_button: 1
+    gripper_axis: 5
+
+    linear_x_axis: 0
+    linear_y_axis: 1
+    linear_z_axis: -1 
+
+    angular_x_axis: 3
+    angular_y_axis: 2
+    angular_z_axis: -1
+
 servo_pose_follower:
   ros__parameters:
-    target_pose_topic: "/target_pose"
+    # ==========================================================
+    # Servo 跟随：Pose -> Twist（MoveIt Servo）
+    # ==========================================================
+    target_pose_topic: "/pose_target_cmds"
     servo_twist_topic: "/servo_node/delta_twist_cmds"
     planning_frame: "base"
     ee_frame: "tool0"
