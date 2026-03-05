@@ -55,6 +55,9 @@ ros2 service call /data_collector/go_home std_srvs/srv/Trigger {}
 
 ```
 
+```bash
+# 播放demo
+
 python3 -m colcon build --packages-select teleop_control_py --symlink-install
 
 python3 scripts/visualize_hdf5_demo.py data/libero_demos.hdf5 --list --no-file-lock
@@ -63,4 +66,4 @@ python3 scripts/visualize_hdf5_demo.py data/libero_demos.hdf5 --no-file-lock
 
 #指定demo
 python3 scripts/visualize_hdf5_demo.py data/libero_demos.hdf5 --demo demo_1 --keys eye_in_hand_rgb agentview_rgb --fps 30 --no-file-lock
-
+```
