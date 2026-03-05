@@ -52,7 +52,7 @@ data_collector:
     # - qbsofthand：本工程的 qbsofthand_control 主要靠 service 控制，没有稳定的“状态话题”
     #   因此默认用 /gripper/cmd 作为“状态代理”（数据集标签通常够用）
     # 可选值："robotic_gripper" | "qbsofthand"
-    end_effector_type: "qbsofthand"
+    end_effector_type: "robotic_gripper"
 
     # 可选：强制指定夹爪状态 topic（消息类型 Float32，范围 [0,1]）
     # 留空则根据 end_effector_type 自动选择下面的默认值

@@ -50,6 +50,7 @@ import rclpy
 from cv_bridge import CvBridge
 from geometry_msgs.msg import PoseStamped
 from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
 from rclpy.time import Time
 from sensor_msgs.msg import Image, JointState
 from std_msgs.msg import Float32
@@ -508,26 +509,28 @@ class DataCollectorNode(Node):
         pose_topic = str(self.get_parameter("tool_pose_topic").value)
         gripper_topic = self._resolve_gripper_topic()
 
+        # Store heavy topics; subscribe lazily only when recording.
+        self._global_topic = str(global_topic)
+        self._wrist_topic = str(wrist_topic)
+        self._joint_topic = str(joint_topic)
+        self._sub_global = None
+        self._sub_wrist = None
+        self._sub_joint = None
+        self._sync = None
+        self._sync_active = False
+
         # Go-home publisher
         home_topic = str(self.get_parameter("home_joint_trajectory_topic").value)
         self._home_pub = self.create_publisher(JointTrajectory, home_topic, 10)
 
         # Separate subscriptions for cached topics
-        self.create_subscription(PoseStamped, pose_topic, self._on_tool_pose, 30)
-        self.create_subscription(Float32, gripper_topic, self._on_gripper, 30)
+        # Use sensor-data QoS to avoid backpressure-induced stutter.
+        self.create_subscription(PoseStamped, pose_topic, self._on_tool_pose, qos_profile_sensor_data)
+        self.create_subscription(Float32, gripper_topic, self._on_gripper, qos_profile_sensor_data)
 
-        # Time sync for: global image, wrist image, joint states
-        self._sub_global = message_filters.Subscriber(self, Image, global_topic)
-        self._sub_wrist = message_filters.Subscriber(self, Image, wrist_topic)
-        self._sub_joint = message_filters.Subscriber(self, JointState, joint_topic)
-
-        self._sync = message_filters.ApproximateTimeSynchronizer(
-            [self._sub_global, self._sub_wrist, self._sub_joint],
-            queue_size=int(self.get_parameter("sync_queue_size").value),
-            slop=float(self.get_parameter("sync_slop_sec").value),
-            allow_headerless=False,
-        )
-        self._sync.registerCallback(self._on_synced)
+        # NOTE: We intentionally do NOT subscribe to image topics here.
+        # Subscribing to high-bandwidth sensor_msgs/Image can reduce camera FPS
+        # even if we are not recording yet. We subscribe only on ~/start.
 
         # --- Services ---
         self._srv_start = self.create_service(Trigger, "~/start", self._srv_start_cb)
@@ -552,6 +555,64 @@ class DataCollectorNode(Node):
         period = float(self.get_parameter("stats_period_sec").value)
         if period > 0.0:
             self._stats_timer = self.create_timer(period, self._log_stats)
+
+    def _start_sync_subscriptions(self) -> None:
+        if self._sync_active:
+            return
+
+        def _mf_sub(msg_type, topic: str):
+            # Prefer SensorData QoS (best-effort) to prevent reliable-QoS backlog/latency.
+            # Older message_filters versions may not accept qos_profile.
+            try:
+                return message_filters.Subscriber(self, msg_type, topic, qos_profile=qos_profile_sensor_data)
+            except TypeError:
+                return message_filters.Subscriber(self, msg_type, topic)
+
+        self._sub_global = _mf_sub(Image, self._global_topic)
+        self._sub_wrist = _mf_sub(Image, self._wrist_topic)
+        self._sub_joint = _mf_sub(JointState, self._joint_topic)
+
+        self._sync = message_filters.ApproximateTimeSynchronizer(
+            [self._sub_global, self._sub_wrist, self._sub_joint],
+            queue_size=int(self.get_parameter("sync_queue_size").value),
+            slop=float(self.get_parameter("sync_slop_sec").value),
+            allow_headerless=False,
+        )
+        self._sync.registerCallback(self._on_synced)
+        self._sync_active = True
+        self.get_logger().info(
+            "Sync subscriptions started: "
+            f"global={self._global_topic} wrist={self._wrist_topic} joint={self._joint_topic}"
+        )
+
+    def _stop_sync_subscriptions(self) -> None:
+        if not self._sync_active:
+            return
+
+        self._sync = None
+
+        def _destroy_mf_sub(mf_sub) -> None:
+            if mf_sub is None:
+                return
+            # message_filters.Subscriber usually stores the underlying rclpy subscription on one of these attrs.
+            for attr in ("sub", "subscription", "_sub"):
+                sub = getattr(mf_sub, attr, None)
+                if sub is not None:
+                    try:
+                        self.destroy_subscription(sub)
+                    except Exception:
+                        pass
+                    break
+
+        _destroy_mf_sub(self._sub_global)
+        _destroy_mf_sub(self._sub_wrist)
+        _destroy_mf_sub(self._sub_joint)
+
+        self._sub_global = None
+        self._sub_wrist = None
+        self._sub_joint = None
+        self._sync_active = False
+        self.get_logger().info("Sync subscriptions stopped")
 
     def _inc_stat(self, key: str, n: int = 1) -> None:
         with self._stats_lock:
@@ -813,6 +874,17 @@ class DataCollectorNode(Node):
         self._current_demo_name = demo_name
         self._recording = True
 
+        # Start heavy subscriptions only when we really begin recording.
+        try:
+            self._start_sync_subscriptions()
+        except Exception as exc:  # noqa: BLE001
+            self._recording = False
+            self._current_demo_name = None
+            res.success = False
+            res.message = f"Failed to start sync subscriptions: {exc!r}"
+            self.get_logger().error(res.message)
+            return res
+
         try:
             self._queue.put_nowait(Command(kind="start_demo", demo_name=demo_name))
         except queue.Full:
@@ -836,6 +908,12 @@ class DataCollectorNode(Node):
         demo_name = self._current_demo_name
         self._recording = False
         self._current_demo_name = None
+
+        # Stop heavy subscriptions when not recording to avoid impacting camera FPS.
+        try:
+            self._stop_sync_subscriptions()
+        except Exception:
+            pass
 
         try:
             self._queue.put_nowait(Command(kind="stop_demo", demo_name=demo_name))

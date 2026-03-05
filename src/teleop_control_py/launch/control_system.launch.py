@@ -234,9 +234,6 @@ def _maybe_include_realsense(context, *args, **kwargs):
 	actions.append(
 		IncludeLaunchDescription(
 			PythonLaunchDescriptionSource(realsense_launch_path),
-			launch_arguments={
-				"align_depth.enable": "true",
-			}.items(),
 		)
 	)
 	actions.append(LogInfo(msg="[control_system] Included realsense2_camera/rs_launch.py"))

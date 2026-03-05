@@ -13,6 +13,7 @@ from typing import List, Optional
 import rclpy
 from rclpy.node import Node
 from rclpy.parameter import Parameter
+from rclpy.qos import qos_profile_sensor_data
 from rcl_interfaces.srv import SetParameters
 from sensor_msgs.msg import Image, JointState
 from geometry_msgs.msg import PoseStamped
@@ -48,6 +49,13 @@ class ROS2Worker(QThread):
         self.node = None
         self.bridge = CvBridge()
         self._is_running = True
+
+        self.global_sub = None
+        self.wrist_sub = None
+
+        # Only decode/emit images when a preview window is actually consuming them.
+        # This avoids heavy cv_bridge + Qt rendering cost during recording.
+        self.enable_image_processing = False
         
         self.is_recording = False
         self.start_time = 0.0
@@ -60,12 +68,48 @@ class ROS2Worker(QThread):
             'gripper': 0.0
         }
 
+    def _ensure_image_subscriptions(self):
+        if self.node is None:
+            return
+        if self.global_sub is None:
+            self.global_sub = self.node.create_subscription(
+                Image, self.global_topic, self.global_callback, qos_profile_sensor_data
+            )
+        if self.wrist_sub is None:
+            self.wrist_sub = self.node.create_subscription(
+                Image, self.wrist_topic, self.wrist_callback, qos_profile_sensor_data
+            )
+
+    def _destroy_image_subscriptions(self):
+        if self.node is None:
+            return
+        if self.global_sub is not None:
+            try:
+                self.node.destroy_subscription(self.global_sub)
+            except Exception:
+                pass
+            self.global_sub = None
+        if self.wrist_sub is not None:
+            try:
+                self.node.destroy_subscription(self.wrist_sub)
+            except Exception:
+                pass
+            self.wrist_sub = None
+
+    def _image_subs_timer_callback(self):
+        # Subscribing to sensor_msgs/Image still deserializes/copies large buffers into Python.
+        # Only subscribe when we truly need preview images.
+        if self.enable_image_processing:
+            self._ensure_image_subscriptions()
+        else:
+            self._destroy_image_subscriptions()
+
     def run(self):
         rclpy.init()
         self.node = Node('teleop_gui_node')
-        
-        self.global_sub = self.node.create_subscription(Image, self.global_topic, self.global_callback, 10)
-        self.wrist_sub = self.node.create_subscription(Image, self.wrist_topic, self.wrist_callback, 10)
+
+        # Do NOT subscribe to images by default; only when preview is open.
+        self.image_subs_timer = self.node.create_timer(0.2, self._image_subs_timer_callback)
             
         self.joint_sub = self.node.create_subscription(JointState, '/joint_states', self.joint_callback, 10)
         self.pose_sub = self.node.create_subscription(PoseStamped, '/tcp_pose_broadcaster/pose', self.pose_callback, 10)
@@ -79,25 +123,37 @@ class ROS2Worker(QThread):
 
         self.stats_timer = self.node.create_timer(0.1, self.stats_timer_callback)
 
-        self.log_signal.emit(f"ROS 2 监听已启动:\n - 全局: {self.global_topic}\n - 手部: {self.wrist_topic}")
+        self.log_signal.emit(
+            f"ROS 2 监听已启动:\n - 全局: {self.global_topic} (预览打开时才订阅)"
+            f"\n - 手部: {self.wrist_topic} (预览打开时才订阅)"
+        )
         
         while rclpy.ok() and self._is_running:
             rclpy.spin_once(self.node, timeout_sec=0.05)
+
+        try:
+            self._destroy_image_subscriptions()
+        except Exception:
+            pass
             
         self.node.destroy_node()
         rclpy.shutdown()
 
     def global_callback(self, msg):
         try:
-            cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
-            self.global_image_signal.emit(cv_image)
             if self.is_recording:
                 self.recorded_frames += 1
+            if not self.enable_image_processing:
+                return
+            cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+            self.global_image_signal.emit(cv_image)
         except Exception:
             pass
 
     def wrist_callback(self, msg):
         try:
+            if not self.enable_image_processing:
+                return
             cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
             self.wrist_image_signal.emit(cv_image)
         except Exception:
@@ -180,7 +236,8 @@ class ROS2Worker(QThread):
             mins = elapsed_sec // 60
             secs = elapsed_sec % 60
             time_str = f"{mins:02d}:{secs:02d}"
-            self.record_stats_signal.emit(self.recorded_frames, time_str)
+            frames = self.recorded_frames if (self.global_sub is not None) else -1
+            self.record_stats_signal.emit(frames, time_str)
 
     def call_start_record(self):
         if self.start_cli.wait_for_service(timeout_sec=1.0):
@@ -667,7 +724,8 @@ class CameraPreviewWindow(QDialog):
 
     @Slot(int, str)
     def update_record_stats(self, frames, time_str):
-        self.lbl_record_status.setText(f"状态: 🔴录制中 | 时长: {time_str} | 估算帧数: {frames}")
+        frames_str = "N/A" if frames is None or int(frames) < 0 else str(int(frames))
+        self.lbl_record_status.setText(f"状态: 🔴录制中 | 时长: {time_str} | 估算帧数: {frames_str}")
         self.lbl_record_status.setStyleSheet("font-weight: bold; font-size: 14px; color: red;")
         
     def reset_record_stats(self):
@@ -690,6 +748,20 @@ class TeleopMainWindow(QMainWindow):
 
         self.setup_ui()
         self.refresh_topics()
+
+    def _shutdown(self) -> None:
+        # Idempotent cleanup for both window-close and Ctrl-C exit.
+        try:
+            if self.ros_worker:
+                self.ros_worker.stop()
+        except Exception:
+            pass
+
+        for key in list(self.processes.keys()):
+            try:
+                self.kill_subprocess(key)
+            except Exception:
+                pass
 
     def setup_ui(self):
         central_widget = QWidget()
@@ -875,7 +947,8 @@ class TeleopMainWindow(QMainWindow):
         
         # 定义你指定的默认话题
         global_default = "/camera/camera/color/image_raw"
-        wrist_default = "/oak/rgb/image_raw"
+        # GUI 启动 OAK 使用 depthai_ros_driver，常见 RGB topic 为 /color/video/image
+        wrist_default = "/color/video/image"
         
         try:
             res = subprocess.run(
@@ -959,7 +1032,8 @@ class TeleopMainWindow(QMainWindow):
 
     def toggle_realsense(self, checked):
         if checked:
-            cmd = ["ros2", "launch", "realsense2_camera", "rs_launch.py", "align_depth.enable:=true"]
+            # Use RealSense launch defaults (do not override any parameters here).
+            cmd = ["ros2", "launch", "realsense2_camera", "rs_launch.py"]
             self.run_subprocess("realsense", cmd)
             self.btn_rs.setText("⏹ 停止 RealSense")
             self.btn_rs.setStyleSheet("background-color: lightgreen;")
@@ -970,7 +1044,17 @@ class TeleopMainWindow(QMainWindow):
 
     def toggle_oak(self, checked):
         if checked:
-            cmd = ["ros2", "launch", "depthai_ros_driver", "camera.launch.py"]
+            # Use depthai_examples to publish the video stream topic (/color/video/image).
+            # This matches data_collector_params.yaml (oakd_rgb_topic) and avoids the /oak/... topic set.
+            cmd = [
+                "ros2",
+                "launch",
+                "depthai_examples",
+                "rgb_stereo_node.launch.py",
+                # "useVideo:=true",
+                # "usePreview:=false",
+                # "useDepth:=false",
+            ]
             self.run_subprocess("oak", cmd)
             self.btn_oak.setText("⏹ 停止 OAK")
             self.btn_oak.setStyleSheet("background-color: lightgreen;")
@@ -1117,7 +1201,14 @@ class TeleopMainWindow(QMainWindow):
 
     @Slot(int, str)
     def update_main_record_stats(self, frames, time_str):
-        self.lbl_main_record_stats.setText(f"录制时长: {time_str} | 估算帧数: {frames}")
+        frames_str = "N/A" if frames is None or int(frames) < 0 else str(int(frames))
+        self.lbl_main_record_stats.setText(f"录制时长: {time_str} | 估算帧数: {frames_str}")
+
+    @Slot(int)
+    def _on_preview_window_finished(self, _result: int):
+        # The preview window is closed; stop heavy image decoding.
+        if self.ros_worker is not None:
+            self.ros_worker.enable_image_processing = False
 
     def open_preview_window(self):
         if self.ros_worker is None:
@@ -1126,6 +1217,7 @@ class TeleopMainWindow(QMainWindow):
             
         if self.preview_window is None:
             self.preview_window = CameraPreviewWindow(self)
+            self.preview_window.finished.connect(self._on_preview_window_finished)
             self.ros_worker.global_image_signal.connect(self.preview_window.update_global_image)
             self.ros_worker.wrist_image_signal.connect(self.preview_window.update_wrist_image)
             self.ros_worker.robot_state_str_signal.connect(self.preview_window.update_robot_state_str)
@@ -1133,6 +1225,9 @@ class TeleopMainWindow(QMainWindow):
             
             if not self.ros_worker.is_recording:
                 self.preview_window.reset_record_stats()
+
+        # Enable heavy image decoding only when the preview window is used.
+        self.ros_worker.enable_image_processing = True
         
         self.preview_window.show()
         self.preview_window.raise_()
@@ -1148,15 +1243,22 @@ class TeleopMainWindow(QMainWindow):
         viewer.exec()
 
     def closeEvent(self, event):
-        if self.ros_worker:
-            self.ros_worker.stop()
-        for key in list(self.processes.keys()):
-            self.kill_subprocess(key)
+        self._shutdown()
         event.accept()
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    signal.signal(signal.SIGINT, signal.SIG_DFL)
     window = TeleopMainWindow()
     window.show()
-    sys.exit(app.exec())
+    exit_code = 0
+    try:
+        # Keep Python's default SIGINT handler (KeyboardInterrupt) so we can cleanup.
+        exit_code = app.exec()
+    except KeyboardInterrupt:
+        exit_code = 0
+    finally:
+        try:
+            window._shutdown()
+        except Exception:
+            pass
+    sys.exit(exit_code)
