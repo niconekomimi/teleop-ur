@@ -745,6 +745,9 @@ class TeleopMainWindow(QMainWindow):
         self.processes = {}
         self.ros_worker = None
         self.preview_window = None
+        self.process_watch_timer = QTimer(self)
+        self.process_watch_timer.timeout.connect(self._poll_subprocesses)
+        self.process_watch_timer.start(1000)
 
         self.setup_ui()
         self.refresh_topics()
@@ -772,9 +775,10 @@ class TeleopMainWindow(QMainWindow):
         settings_group = QGroupBox("1. 系统配置")
         settings_layout = QGridLayout()
         
-        settings_layout.addWidget(QLabel("遥操作模式:"), 0, 0)
+        settings_layout.addWidget(QLabel("输入后端:"), 0, 0)
         self.mode_combo = QComboBox()
-        self.mode_combo.addItems(["xbox", "hand"])
+        self.mode_combo.addItem("joy (Xbox 手柄)", "joy")
+        self.mode_combo.addItem("mediapipe (手势输入)", "mediapipe")
         settings_layout.addWidget(self.mode_combo, 0, 1)
 
         settings_layout.addWidget(QLabel("机器人 IP:"), 0, 2)
@@ -783,23 +787,29 @@ class TeleopMainWindow(QMainWindow):
 
         settings_layout.addWidget(QLabel("末端执行器:"), 0, 4)
         self.ee_combo = QComboBox()
-        self.ee_combo.addItems(["qbsofthand", "robotiq"])
-        self.ee_combo.setCurrentText("robotiq")
+        self.ee_combo.addItem("robotiq", "robotiq")
+        self.ee_combo.addItem("qbsofthand", "qbsofthand")
+        self.ee_combo.setCurrentIndex(0)
         settings_layout.addWidget(self.ee_combo, 0, 5)
 
-        settings_layout.addWidget(QLabel("全局相机话题:"), 1, 0)
+        self.input_hint_label = QLabel()
+        self.input_hint_label.setWordWrap(True)
+        self.input_hint_label.setStyleSheet("color: #555; font-size: 12px;")
+        settings_layout.addWidget(self.input_hint_label, 1, 0, 1, 6)
+
+        settings_layout.addWidget(QLabel("预览全局图像话题:"), 2, 0)
         self.global_topic_combo = QComboBox()
         self.global_topic_combo.setEditable(True)
-        settings_layout.addWidget(self.global_topic_combo, 1, 1)
+        settings_layout.addWidget(self.global_topic_combo, 2, 1)
 
-        settings_layout.addWidget(QLabel("手部相机话题:"), 1, 2)
+        settings_layout.addWidget(QLabel("预览手部图像话题:"), 2, 2)
         self.wrist_topic_combo = QComboBox()
         self.wrist_topic_combo.setEditable(True)
-        settings_layout.addWidget(self.wrist_topic_combo, 1, 3)
+        settings_layout.addWidget(self.wrist_topic_combo, 2, 3)
 
         self.btn_refresh = QPushButton("🔄 刷新图像话题")
         self.btn_refresh.clicked.connect(self.refresh_topics)
-        settings_layout.addWidget(self.btn_refresh, 1, 4)
+        settings_layout.addWidget(self.btn_refresh, 2, 4)
 
         settings_group.setLayout(settings_layout)
         main_layout.addWidget(settings_group)
@@ -874,15 +884,30 @@ class TeleopMainWindow(QMainWindow):
         self.btn_set_home_current.clicked.connect(self.set_home_from_current)
         record_layout.addWidget(self.btn_set_home_current, 1, 4)
 
-        # 第 2 行: 状态信息
-        record_layout.addWidget(QLabel("当前录制序列:"), 2, 0)
+        # 第 2 行: 采集相机源
+        record_layout.addWidget(QLabel("录制全局相机源:"), 2, 0)
+        self.global_camera_source_combo = QComboBox()
+        self.global_camera_source_combo.addItem("realsense", "realsense")
+        self.global_camera_source_combo.addItem("oakd", "oakd")
+        self.global_camera_source_combo.setCurrentIndex(0)
+        record_layout.addWidget(self.global_camera_source_combo, 2, 1)
+
+        record_layout.addWidget(QLabel("录制手部相机源:"), 2, 2)
+        self.wrist_camera_source_combo = QComboBox()
+        self.wrist_camera_source_combo.addItem("oakd", "oakd")
+        self.wrist_camera_source_combo.addItem("realsense", "realsense")
+        self.wrist_camera_source_combo.setCurrentIndex(0)
+        record_layout.addWidget(self.wrist_camera_source_combo, 2, 3)
+
+        # 第 3 行: 状态信息
+        record_layout.addWidget(QLabel("当前录制序列:"), 3, 0)
         self.lbl_demo_status = QLabel("无 (未录制)")
         self.lbl_demo_status.setStyleSheet("color: blue; font-weight: bold;")
-        record_layout.addWidget(self.lbl_demo_status, 2, 1)
+        record_layout.addWidget(self.lbl_demo_status, 3, 1)
         
         self.lbl_main_record_stats = QLabel("录制时长: 00:00 | 帧数: 0")
         self.lbl_main_record_stats.setStyleSheet("font-weight: bold; color: #555;")
-        record_layout.addWidget(self.lbl_main_record_stats, 2, 2, 1, 3)
+        record_layout.addWidget(self.lbl_main_record_stats, 3, 2, 1, 3)
 
         record_group.setLayout(record_layout)
         main_layout.addWidget(record_group)
@@ -904,6 +929,8 @@ class TeleopMainWindow(QMainWindow):
 
         # 在界面初始化时尝试加载一次已持久化的 Home 覆盖文件
         self._apply_persisted_home_to_ui_log()
+        self.mode_combo.currentIndexChanged.connect(self._update_input_hint)
+        self._update_input_hint()
 
     def _home_override_yaml_path(self) -> Path:
         # 放在 scripts 目录下，跟随工程一起移动，且通常可写
@@ -932,6 +959,75 @@ class TeleopMainWindow(QMainWindow):
         path = self._home_override_yaml_path()
         if path.exists():
             self.log(f"检测到已保存的 Home 覆盖文件: {path}")
+
+    def _selected_input_type(self) -> str:
+        value = self.mode_combo.currentData()
+        return str(value).strip().lower() if value is not None else "joy"
+
+    def _selected_gripper_type(self) -> str:
+        value = self.ee_combo.currentData()
+        return str(value).strip().lower() if value is not None else "robotiq"
+
+    def _selected_collector_end_effector_type(self) -> str:
+        gripper_type = self._selected_gripper_type()
+        if gripper_type == "qbsofthand":
+            return "qbsofthand"
+        return "robotic_gripper"
+
+    def _selected_camera_source(self, combo: QComboBox, fallback: str) -> str:
+        value = combo.currentData()
+        return str(value).strip().lower() if value is not None else fallback
+
+    def _update_input_hint(self) -> None:
+        input_type = self._selected_input_type()
+        if input_type == "mediapipe":
+            self.input_hint_label.setText(
+                "提示: MediaPipe 模式不会自动生成手势数据，当前 teleop 仍需要外部节点发布 `/mediapipe/hand_pose`。"
+            )
+            self.input_hint_label.setStyleSheet("color: #b71c1c; font-size: 12px; font-weight: bold;")
+            return
+
+        self.input_hint_label.setText(
+            "提示: Joy 模式默认配合 Xbox 手柄工作，控制链路会直接输出到 MoveIt Servo。"
+        )
+        self.input_hint_label.setStyleSheet("color: #555; font-size: 12px;")
+
+    def _set_button_running(self, button: QPushButton, running: bool, start_text: str, stop_text: str, style: str = "") -> None:
+        button.blockSignals(True)
+        button.setChecked(running)
+        button.blockSignals(False)
+        button.setText(stop_text if running else start_text)
+        button.setStyleSheet(style if running else ("font-weight: bold;" if button is self.btn_teleop else ""))
+
+    def _handle_process_exit(self, key: str, returncode: int) -> None:
+        self.log(f"进程 {key} 已退出，返回码: {returncode}")
+        self.processes.pop(key, None)
+
+        if key == "realsense":
+            self._set_button_running(self.btn_rs, False, "▶ 启动 RealSense", "⏹ 停止 RealSense")
+            return
+
+        if key == "oak":
+            self._set_button_running(self.btn_oak, False, "▶ 启动 OAK", "⏹ 停止 OAK")
+            return
+
+        if key == "teleop":
+            self._set_button_running(self.btn_teleop, False, "▶ 启动遥操作系统", "⏹ 停止遥操作系统")
+            return
+
+        if key == "data_collector":
+            self._set_button_running(self.btn_collector, False, "▶ 启动采集节点", "⏹ 停止采集节点")
+            if self.ros_worker:
+                self.ros_worker.stop()
+                self.ros_worker = None
+            return
+
+    def _poll_subprocesses(self) -> None:
+        for key, proc in list(self.processes.items()):
+            returncode = proc.poll()
+            if returncode is None:
+                continue
+            self._handle_process_exit(key, int(returncode))
 
     # ================= 业务逻辑 =================
 
@@ -1034,13 +1130,13 @@ class TeleopMainWindow(QMainWindow):
         if checked:
             # Use RealSense launch defaults (do not override any parameters here).
             cmd = ["ros2", "launch", "realsense2_camera", "rs_launch.py"]
-            self.run_subprocess("realsense", cmd)
-            self.btn_rs.setText("⏹ 停止 RealSense")
-            self.btn_rs.setStyleSheet("background-color: lightgreen;")
+            if self.run_subprocess("realsense", cmd):
+                self._set_button_running(self.btn_rs, True, "▶ 启动 RealSense", "⏹ 停止 RealSense", "background-color: lightgreen;")
+            else:
+                self._set_button_running(self.btn_rs, False, "▶ 启动 RealSense", "⏹ 停止 RealSense")
         else:
             self.kill_subprocess("realsense")
-            self.btn_rs.setText("▶ 启动 RealSense")
-            self.btn_rs.setStyleSheet("")
+            self._set_button_running(self.btn_rs, False, "▶ 启动 RealSense", "⏹ 停止 RealSense")
 
     def toggle_oak(self, checked):
         if checked:
@@ -1055,41 +1151,67 @@ class TeleopMainWindow(QMainWindow):
                 # "usePreview:=false",
                 # "useDepth:=false",
             ]
-            self.run_subprocess("oak", cmd)
-            self.btn_oak.setText("⏹ 停止 OAK")
-            self.btn_oak.setStyleSheet("background-color: lightgreen;")
+            if self.run_subprocess("oak", cmd):
+                self._set_button_running(self.btn_oak, True, "▶ 启动 OAK", "⏹ 停止 OAK", "background-color: lightgreen;")
+            else:
+                self._set_button_running(self.btn_oak, False, "▶ 启动 OAK", "⏹ 停止 OAK")
         else:
             self.kill_subprocess("oak")
-            self.btn_oak.setText("▶ 启动 OAK")
-            self.btn_oak.setStyleSheet("")
+            self._set_button_running(self.btn_oak, False, "▶ 启动 OAK", "⏹ 停止 OAK")
 
     def toggle_teleop(self, checked):
         if checked:
-            mode = self.mode_combo.currentText()
+            input_type = self._selected_input_type()
             ip = self.ip_input.text()
-            ee = self.ee_combo.currentText().strip().lower() if hasattr(self, "ee_combo") else "auto"
+            gripper_type = self._selected_gripper_type()
+            self.log(
+                f"准备启动遥操作系统: input_type={input_type}, gripper_type={gripper_type}, robot_ip={ip}"
+            )
             cmd = [
                 "ros2", "launch", "teleop_control_py", "control_system.launch.py",
                 f"robot_ip:={ip}",
-                f"control_mode:={mode}",
-                f"end_effector:={ee}",
+                f"input_type:={input_type}",
+                f"gripper_type:={gripper_type}",
                 "enable_camera:=false"  # <---- 修复核心：严禁 launch 内部再次启动 RealSense，避免 USB 冲突
             ]
-            self.run_subprocess("teleop", cmd)
-            self.btn_teleop.setText("⏹ 停止遥操作系统")
-            self.btn_teleop.setStyleSheet("background-color: lightgreen; font-weight: bold;")
+            if self.run_subprocess("teleop", cmd):
+                self._set_button_running(
+                    self.btn_teleop,
+                    True,
+                    "▶ 启动遥操作系统",
+                    "⏹ 停止遥操作系统",
+                    "background-color: lightgreen; font-weight: bold;",
+                )
+            else:
+                self._set_button_running(self.btn_teleop, False, "▶ 启动遥操作系统", "⏹ 停止遥操作系统")
+                return
+
+            if input_type == "mediapipe":
+                QMessageBox.information(
+                    self,
+                    "MediaPipe 提示",
+                    "当前已选择 mediapipe 输入。\n\n请确认已有外部节点持续发布 `/mediapipe/hand_pose`，否则机械臂不会收到手势输入。",
+                )
             
             QMessageBox.information(self, "操作提示", "遥操作系统已启动！\n\n请不要忘记按示教器的【程序运行播放键】。")
         else:
             self.kill_subprocess("teleop")
-            self.btn_teleop.setText("▶ 启动遥操作系统")
-            self.btn_teleop.setStyleSheet("font-weight: bold;")
+            self._set_button_running(self.btn_teleop, False, "▶ 启动遥操作系统", "⏹ 停止遥操作系统")
 
     def toggle_data_collector(self, checked):
         if checked:
             out_path = self.record_path_input.text()
             global_topic = self.global_topic_combo.currentText()
             wrist_topic = self.wrist_topic_combo.currentText()
+            collector_ee_type = self._selected_collector_end_effector_type()
+            global_camera_source = self._selected_camera_source(self.global_camera_source_combo, "realsense")
+            wrist_camera_source = self._selected_camera_source(self.wrist_camera_source_combo, "oakd")
+            self.log(
+                "准备启动采集节点: "
+                f"end_effector_type={collector_ee_type}, output_path={out_path}, "
+                f"global_camera_source={global_camera_source}, wrist_camera_source={wrist_camera_source}, "
+                f"preview_global_topic={global_topic}, preview_wrist_topic={wrist_topic}"
+            )
             
             yaml_args = []
             try:
@@ -1118,20 +1240,21 @@ class TeleopMainWindow(QMainWindow):
                 
             cmd.extend([
                 "-p", f"output_path:={out_path}",
-                "-p", f"global_image_topic:={global_topic}",
-                "-p", f"wrist_image_topic:={wrist_topic}",
-                "-p", "end_effector_type:=qbsofthand"  # 确保软体手类型
+                "-p", f"global_camera_source:={global_camera_source}",
+                "-p", f"wrist_camera_source:={wrist_camera_source}",
+                "-p", f"end_effector_type:={collector_ee_type}"
             ])
 
-            self.run_subprocess("data_collector", cmd)
-            self.btn_collector.setText("⏹ 停止采集节点")
-            self.btn_collector.setStyleSheet("background-color: lightgreen;")
+            if not self.run_subprocess("data_collector", cmd):
+                self._set_button_running(self.btn_collector, False, "▶ 启动采集节点", "⏹ 停止采集节点")
+                return
+
+            self._set_button_running(self.btn_collector, True, "▶ 启动采集节点", "⏹ 停止采集节点", "background-color: lightgreen;")
             
             self.start_ros_worker(global_topic, wrist_topic)
         else:
             self.kill_subprocess("data_collector")
-            self.btn_collector.setText("▶ 启动采集节点")
-            self.btn_collector.setStyleSheet("")
+            self._set_button_running(self.btn_collector, False, "▶ 启动采集节点", "⏹ 停止采集节点")
             
             if self.ros_worker:
                 self.ros_worker.stop()
