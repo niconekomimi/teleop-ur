@@ -1,27 +1,21 @@
 data_collector:
   ros__parameters:
     # ==========================================================
-    # 1) 输出文件
+    # 1) 输出文件与采样频率
     # ==========================================================
     # 采集到的 LIBERO / robomimic 结构 HDF5 文件路径
     output_path: "/home/rvl/collect_datasets_ws/data/libero_demos.hdf5"
+    # Timer 触发的默认采样频率（Hz）
+    record_fps: 10.0
 
     # ==========================================================
     # 2) 相机输入与角色映射
     # ==========================================================
-    # 先定义两路“物理相机”的原始图像 topic（按你系统实际 topic 改）
-    realsense_color_topic: "/camera/camera/color/image_raw"
-    oakd_rgb_topic: "/color/video/image"
-
-    # 再给两种相机分配角色：全局相机（agentview）和手腕相机（eye_in_hand）
+    # 给两种物理相机分配角色：全局相机（agentview）和手腕相机（eye_in_hand）
+    # 节点会直接通过官方 SDK 主动拉帧，不再依赖 ROS 图像 topic。
     # 可选值："realsense" | "oakd"
     global_camera_source: "realsense"
     wrist_camera_source: "oakd"
-
-    # 可选：直接强制指定 role 的 topic（优先级最高）
-    # 一般不需要填；留空则按上面的 source 映射自动选择
-    global_image_topic: ""
-    wrist_image_topic: ""
 
     # ==========================================================
     # 3) 机械臂状态与关节顺序
@@ -69,16 +63,14 @@ data_collector:
     require_gripper: false
 
     # ==========================================================
-    # 5) 同步与时效约束
+    # 5) 时效约束
     # ==========================================================
-    # 三路同步：全局图像 + 手腕图像 + /joint_states
-    # ApproximateTimeSynchronizer 的 slop（秒）
-    sync_slop_sec: 0.05
-    sync_queue_size: 30
-    # tool_pose 允许的“最大时间差”（相对于图像时间戳，超过则丢弃该帧）
+    # tool_pose 允许的“最大时间差”（相对于采样时刻，超过则丢弃该帧）
     pose_max_age_sec: 0.05
     # gripper 允许的“最大年龄”（相对于当前时间，超过则丢弃该帧）
     gripper_max_age_sec: 0.5
+    # 某些位姿发布器可能给出零时间戳；开启后会以当前采样时刻作为参考。
+    pose_stamp_zero_is_ref: true
 
     # ==========================================================
     # 6) 图像处理与写盘参数
