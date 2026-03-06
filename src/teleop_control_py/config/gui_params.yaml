@@ -1,24 +1,31 @@
 teleop_gui:
   ros__parameters:
-    default_robot_ip: "192.168.1.211"
-    default_reverse_ip: "192.168.1.10"
-    ur_type: "ur5"
-    ur_type_options: ["ur3", "ur5", "ur10", "ur16e", "ur20", "ur30e"]
-
-    default_input_type: "joy"
-    default_gripper_type: "robotiq"
-
-    default_joy_profile: "auto"
-    joy_profiles: ["auto", "xbox", "ps5", "generic"]
-
-    default_mediapipe_input_topic: "/camera/camera/color/image_raw"
-
-    default_preview_global_topic: "/camera/camera/color/image_raw"
-    default_preview_wrist_topic: "/color/video/image"
-
-    camera_driver_options: ["realsense", "oakd"]
-    default_camera_driver: "realsense"
-
-    default_global_camera_source: "realsense"
-    default_wrist_camera_source: "oakd"
-    home_joint_positions: [1.524178, -2.100096, 1.864580, -1.344976, -1.575948, 1.528231]
+    default_robot_ip: 192.168.1.211
+    default_reverse_ip: 192.168.1.10
+    ur_type: ur5
+    default_input_type: joy
+    default_gripper_type: robotiq
+    default_joy_profile: auto
+    joy_profiles:
+    - auto
+    - xbox
+    - ps5
+    - generic
+    default_mediapipe_input_topic: /camera/camera/color/image_raw
+    default_preview_global_topic: /data_collector/preview/global/image_raw
+    default_preview_wrist_topic: /data_collector/preview/wrist/image_raw
+    camera_driver_options:
+    - realsense
+    - oakd
+    default_camera_driver: realsense
+    default_global_camera_source: realsense
+    default_wrist_camera_source: oakd
+    default_hdf5_output_dir: /home/rvl/collect_datasets_ws/data
+    default_hdf5_filename: libero_demos.hdf5
+    home_joint_positions:
+    - 1.524178
+    - -2.100096
+    - 1.86458
+    - -1.344976
+    - -1.575948
+    - 1.528231

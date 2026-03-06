@@ -30,6 +30,8 @@ class GuiSettings:
     default_camera_driver: str
     default_global_camera_source: str
     default_wrist_camera_source: str
+    default_hdf5_output_dir: str
+    default_hdf5_filename: str
 
     home_joint_positions: List[float]
 
@@ -89,6 +91,12 @@ def load_gui_settings(current_file: str | Path) -> GuiSettings:
                 raw = params
                 break
 
+    workspace_root = _workspace_root_from_file(current_file)
+    output_dir_raw = str(raw.get("default_hdf5_output_dir", "data")).strip() or "data"
+    output_dir = Path(output_dir_raw).expanduser()
+    if not output_dir.is_absolute():
+        output_dir = workspace_root / output_dir
+
     return GuiSettings(
         default_robot_ip=str(raw.get("default_robot_ip", "192.168.1.211")),
         default_reverse_ip=str(raw.get("default_reverse_ip", "192.168.1.10")),
@@ -99,12 +107,14 @@ def load_gui_settings(current_file: str | Path) -> GuiSettings:
         default_joy_profile=str(raw.get("default_joy_profile", "auto")),
         joy_profiles=[str(v) for v in raw.get("joy_profiles", ["auto", "xbox", "ps5", "generic"])],
         default_mediapipe_input_topic=str(raw.get("default_mediapipe_input_topic", "/camera/camera/color/image_raw")),
-        default_preview_global_topic=str(raw.get("default_preview_global_topic", "/camera/camera/color/image_raw")),
-        default_preview_wrist_topic=str(raw.get("default_preview_wrist_topic", "/color/video/image")),
+        default_preview_global_topic=str(raw.get("default_preview_global_topic", "/data_collector/preview/global/image_raw")),
+        default_preview_wrist_topic=str(raw.get("default_preview_wrist_topic", "/data_collector/preview/wrist/image_raw")),
         camera_driver_options=[str(v) for v in raw.get("camera_driver_options", ["realsense", "oakd"])],
         default_camera_driver=str(raw.get("default_camera_driver", "realsense")),
         default_global_camera_source=str(raw.get("default_global_camera_source", "realsense")),
         default_wrist_camera_source=str(raw.get("default_wrist_camera_source", "oakd")),
+        default_hdf5_output_dir=str(output_dir),
+        default_hdf5_filename=str(raw.get("default_hdf5_filename", "libero_demos.hdf5")),
         home_joint_positions=[float(v) for v in raw.get("home_joint_positions", [])],
     )
 

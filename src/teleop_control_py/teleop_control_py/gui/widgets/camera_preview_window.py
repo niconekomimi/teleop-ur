@@ -29,7 +29,7 @@ class CameraPreviewWindow(QDialog):
         top_layout.addWidget(self.crop_cb)
         top_layout.addStretch()
 
-        self.lbl_record_status = QLabel("状态: 未录制 | 时长: 00:00 | 估算帧数: 0")
+        self.lbl_record_status = QLabel("状态: 未录制 | 时长: 00:00 | 已录制帧数: 0 | 实时录制帧率: 0.00 Hz")
         self.lbl_record_status.setStyleSheet("font-weight: bold; font-size: 14px; color: blue;")
         top_layout.addWidget(self.lbl_record_status)
         main_layout.addLayout(top_layout)
@@ -113,12 +113,13 @@ class CameraPreviewWindow(QDialog):
     def update_robot_state_str(self, text):
         self.text_robot_state.setText(text)
 
-    @Slot(int, str)
-    def update_record_stats(self, frames, time_str):
+    @Slot(int, str, float)
+    def update_record_stats(self, frames, time_str, realtime_fps):
         frames_str = "N/A" if frames is None or int(frames) < 0 else str(int(frames))
-        self.lbl_record_status.setText(f"状态: 🔴录制中 | 时长: {time_str} | 估算帧数: {frames_str}")
+        fps_text = f"{float(realtime_fps):.2f} Hz" if realtime_fps is not None else "N/A"
+        self.lbl_record_status.setText(f"状态: 🔴录制中 | 时长: {time_str} | 已录制帧数: {frames_str} | 实时录制帧率: {fps_text}")
         self.lbl_record_status.setStyleSheet("font-weight: bold; font-size: 14px; color: red;")
 
     def reset_record_stats(self):
-        self.lbl_record_status.setText("状态: 未录制 | 时长: 00:00 | 估算帧数: 0")
+        self.lbl_record_status.setText("状态: 未录制 | 时长: 00:00 | 已录制帧数: 0 | 实时录制帧率: 0.00 Hz")
         self.lbl_record_status.setStyleSheet("font-weight: bold; font-size: 14px; color: blue;")

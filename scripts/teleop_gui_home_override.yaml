@@ -1,3 +1,0 @@
-data_collector:
-  ros__parameters:
-    home_joint_positions: [1.524178, -2.100096, 1.864580, -1.344976, -1.575948, 1.528231]

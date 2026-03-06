@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import queue
+import sys
 import threading
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
@@ -69,11 +70,15 @@ class HDF5WriterThread(threading.Thread):
             pass
 
     def _log(self, level: str, msg: str) -> None:
-        if self._logger is None:
-            return
-        log_fn = getattr(self._logger, level, None)
-        if callable(log_fn):
-            log_fn(msg)
+        if self._logger is not None:
+            log_fn = getattr(self._logger, level, None)
+            if callable(log_fn):
+                try:
+                    log_fn(msg)
+                    return
+                except Exception:
+                    pass
+        print(f"[HDF5WriterThread][{level.upper()}] {msg}", file=sys.stderr, flush=True)
 
     def _ensure_file_open(self) -> None:
         if self._h5 is not None:
@@ -97,14 +102,54 @@ class HDF5WriterThread(threading.Thread):
             dtype: np.dtype,
             compression: Optional[str],
         ) -> h5py.Dataset:
-            return group.require_dataset(
+            if name not in group:
+                return group.create_dataset(
+                    name,
+                    shape=(0,) + shape_tail,
+                    maxshape=(None,) + shape_tail,
+                    chunks=(1,) + shape_tail,
+                    dtype=dtype,
+                    compression=compression,
+                )
+
+            dataset_obj = group[name]
+            if not isinstance(dataset_obj, h5py.Dataset):
+                raise TypeError(f"Expected dataset at {group.name}/{name}, got {type(dataset_obj)!r}")
+
+            dataset = dataset_obj
+            expected_rank = 1 + len(shape_tail)
+            if len(dataset.shape) != expected_rank or tuple(dataset.shape[1:]) != shape_tail:
+                raise ValueError(
+                    f"Dataset {dataset.name} shape mismatch: existing={dataset.shape}, expected=(N, {shape_tail})"
+                )
+            if dataset.dtype != np.dtype(dtype):
+                raise ValueError(
+                    f"Dataset {dataset.name} dtype mismatch: existing={dataset.dtype}, expected={np.dtype(dtype)}"
+                )
+
+            is_resizable = dataset.chunks is not None and dataset.maxshape is not None and dataset.maxshape[0] is None
+            if is_resizable:
+                return dataset
+
+            existing = dataset[...]
+            del group[name]
+            migrated = group.create_dataset(
                 name,
-                shape=(0,) + shape_tail,
+                shape=existing.shape,
                 maxshape=(None,) + shape_tail,
                 chunks=(1,) + shape_tail,
-                dtype=dtype,
+                dtype=np.dtype(dtype),
                 compression=compression,
             )
+            if existing.shape[0] > 0:
+                migrated[...] = existing
+            self._log("warn", f"HDF5: migrated legacy non-resizable dataset {migrated.name}")
+            return migrated
+
+        existing_count = 0
+        if "actions" in demo_group and isinstance(demo_group["actions"], h5py.Dataset):
+            existing_count = int(demo_group["actions"].shape[0])
+        existing_count = max(existing_count, int(demo_group.attrs.get("num_samples", 0)))
 
         handles: Dict[str, object] = {
             "demo_group": demo_group,
@@ -116,10 +161,13 @@ class HDF5WriterThread(threading.Thread):
             "robot0_eef_quat": _dataset(obs_group, "robot0_eef_quat", (4,), np.float32, None),
         }
 
-        demo_group.attrs["num_samples"] = 0
+        demo_group.attrs["num_samples"] = existing_count
         self._demo_handles[demo_name] = handles
-        self._demo_counts[demo_name] = 0
-        self._log("info", f"HDF5: created group data/{demo_name}")
+        self._demo_counts[demo_name] = existing_count
+        if existing_count > 0:
+            self._log("warn", f"HDF5: reusing existing group data/{demo_name}, appending after {existing_count} samples")
+        else:
+            self._log("info", f"HDF5: created group data/{demo_name}")
 
     def _finalize_demo(self, demo_name: str) -> None:
         handles = self._demo_handles.get(demo_name)

@@ -1,4 +1,5 @@
 import math
+import re
 import time
 
 import numpy as np
@@ -11,7 +12,7 @@ from rclpy.node import Node
 from rclpy.parameter import Parameter
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image, JointState
-from std_msgs.msg import Float32
+from std_msgs.msg import Float32, Float32MultiArray
 from std_srvs.srv import Trigger
 
 
@@ -19,7 +20,7 @@ class ROS2Worker(QThread):
     global_image_signal = Signal(np.ndarray)
     wrist_image_signal = Signal(np.ndarray)
     robot_state_str_signal = Signal(str)
-    record_stats_signal = Signal(int, str)
+    record_stats_signal = Signal(int, str, float)
     log_signal = Signal(str)
     demo_status_signal = Signal(str)
 
@@ -27,6 +28,8 @@ class ROS2Worker(QThread):
         super().__init__()
         self.global_topic = global_topic
         self.wrist_topic = wrist_topic
+        self._global_sub_topic = None
+        self._wrist_sub_topic = None
         self.node = None
         self.bridge = CvBridge()
         self._is_running = True
@@ -37,7 +40,9 @@ class ROS2Worker(QThread):
 
         self.is_recording = False
         self.start_time = 0.0
-        self.recorded_frames = 0
+        self.record_fps = 10.0
+        self.actual_recorded_frames = 0
+        self.realtime_record_fps = 0.0
 
         self.robot_state = {
             "joints": [0.0] * 6,
@@ -46,17 +51,54 @@ class ROS2Worker(QThread):
             "gripper": 0.0,
         }
 
+    def _emit_image_topics_log(self) -> None:
+        self.log_signal.emit(
+            f"ROS 2 图像监听话题已切换:\n - 全局: {self.global_topic} (预览打开时才订阅)"
+            f"\n - 手部: {self.wrist_topic} (预览打开时才订阅)"
+        )
+
+    def set_image_topics(self, global_topic: str, wrist_topic: str) -> None:
+        new_global_topic = str(global_topic).strip()
+        new_wrist_topic = str(wrist_topic).strip()
+        changed = (new_global_topic != self.global_topic) or (new_wrist_topic != self.wrist_topic)
+
+        self.global_topic = new_global_topic
+        self.wrist_topic = new_wrist_topic
+        if not changed:
+            return
+
+        if self.node is not None:
+            self._destroy_image_subscriptions()
+        self._emit_image_topics_log()
+
     def _ensure_image_subscriptions(self):
         if self.node is None:
             return
+        if self.global_sub is not None and self._global_sub_topic != self.global_topic:
+            try:
+                self.node.destroy_subscription(self.global_sub)
+            except Exception:
+                pass
+            self.global_sub = None
+            self._global_sub_topic = None
+        if self.wrist_sub is not None and self._wrist_sub_topic != self.wrist_topic:
+            try:
+                self.node.destroy_subscription(self.wrist_sub)
+            except Exception:
+                pass
+            self.wrist_sub = None
+            self._wrist_sub_topic = None
+
         if self.global_sub is None:
             self.global_sub = self.node.create_subscription(
                 Image, self.global_topic, self.global_callback, qos_profile_sensor_data
             )
+            self._global_sub_topic = self.global_topic
         if self.wrist_sub is None:
             self.wrist_sub = self.node.create_subscription(
                 Image, self.wrist_topic, self.wrist_callback, qos_profile_sensor_data
             )
+            self._wrist_sub_topic = self.wrist_topic
 
     def _destroy_image_subscriptions(self):
         if self.node is None:
@@ -67,12 +109,14 @@ class ROS2Worker(QThread):
             except Exception:
                 pass
             self.global_sub = None
+            self._global_sub_topic = None
         if self.wrist_sub is not None:
             try:
                 self.node.destroy_subscription(self.wrist_sub)
             except Exception:
                 pass
             self.wrist_sub = None
+            self._wrist_sub_topic = None
 
     def _image_subs_timer_callback(self):
         if self.enable_image_processing:
@@ -88,6 +132,12 @@ class ROS2Worker(QThread):
         self.joint_sub = self.node.create_subscription(JointState, "/joint_states", self.joint_callback, 10)
         self.pose_sub = self.node.create_subscription(PoseStamped, "/tcp_pose_broadcaster/pose", self.pose_callback, 10)
         self.gripper_sub = self.node.create_subscription(Float32, "/gripper/cmd", self.gripper_callback, 10)
+        self.record_stats_sub = self.node.create_subscription(
+            Float32MultiArray,
+            "/data_collector/record_stats",
+            self.record_stats_callback,
+            qos_profile_sensor_data,
+        )
 
         self.start_cli = self.node.create_client(Trigger, "/data_collector/start")
         self.stop_cli = self.node.create_client(Trigger, "/data_collector/stop")
@@ -96,10 +146,7 @@ class ROS2Worker(QThread):
 
         self.stats_timer = self.node.create_timer(0.1, self.stats_timer_callback)
 
-        self.log_signal.emit(
-            f"ROS 2 监听已启动:\n - 全局: {self.global_topic} (预览打开时才订阅)"
-            f"\n - 手部: {self.wrist_topic} (预览打开时才订阅)"
-        )
+        self._emit_image_topics_log()
 
         while rclpy.ok() and self._is_running:
             rclpy.spin_once(self.node, timeout_sec=0.05)
@@ -114,8 +161,6 @@ class ROS2Worker(QThread):
 
     def global_callback(self, msg):
         try:
-            if self.is_recording:
-                self.recorded_frames += 1
             if not self.enable_image_processing:
                 return
             cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
@@ -209,12 +254,22 @@ class ROS2Worker(QThread):
 
     def stats_timer_callback(self):
         if self.is_recording:
-            elapsed_sec = int(time.time() - self.start_time)
+            elapsed = max(0.0, time.time() - self.start_time)
+            elapsed_sec = int(elapsed)
             mins = elapsed_sec // 60
             secs = elapsed_sec % 60
             time_str = f"{mins:02d}:{secs:02d}"
-            frames = self.recorded_frames if self.global_sub is not None else -1
-            self.record_stats_signal.emit(frames, time_str)
+            self.record_stats_signal.emit(int(self.actual_recorded_frames), time_str, float(self.realtime_record_fps))
+
+    def record_stats_callback(self, msg):
+        try:
+            data = list(getattr(msg, "data", []))
+            if len(data) >= 1:
+                self.actual_recorded_frames = max(0, int(round(float(data[0]))))
+            if len(data) >= 2:
+                self.realtime_record_fps = max(0.0, float(data[1]))
+        except Exception:
+            pass
 
     def call_start_record(self):
         if self.start_cli.wait_for_service(timeout_sec=1.0):
@@ -260,9 +315,20 @@ class ROS2Worker(QThread):
             if response.success:
                 self.is_recording = True
                 self.start_time = time.time()
-                self.recorded_frames = 0
-                msg_parts = response.message.split()
-                demo_name = msg_parts[-1] if msg_parts else "未知"
+                self.actual_recorded_frames = 0
+                self.realtime_record_fps = 0.0
+                match = re.search(r"at\s+([0-9]+(?:\.[0-9]+)?)\s+Hz", str(response.message))
+                if match:
+                    try:
+                        self.record_fps = max(0.1, float(match.group(1)))
+                    except Exception:
+                        self.record_fps = 10.0
+                demo_match = re.search(r"Started recording\s+(\S+)\s+at\s+[0-9]+(?:\.[0-9]+)?\s+Hz", str(response.message))
+                if demo_match:
+                    demo_name = demo_match.group(1)
+                else:
+                    msg_parts = response.message.split()
+                    demo_name = msg_parts[2] if len(msg_parts) >= 3 else "未知"
                 self.demo_status_signal.emit(demo_name)
         except Exception as exc:
             self.log_signal.emit(f"服务调用异常: {exc}")
@@ -273,6 +339,7 @@ class ROS2Worker(QThread):
             self.log_signal.emit(f"停止录制服务: {response.message}")
             if response.success:
                 self.is_recording = False
+                self.realtime_record_fps = 0.0
                 self.demo_status_signal.emit("无 (未录制)")
         except Exception as exc:
             self.log_signal.emit(f"服务调用异常: {exc}")

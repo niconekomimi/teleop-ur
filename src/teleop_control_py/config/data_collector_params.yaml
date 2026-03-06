@@ -57,6 +57,11 @@ data_collector:
     # ==========================================================
     # 6) 图像处理与写盘
     # ==========================================================
+    preview_enabled: true
+    preview_fps: 30.0
+    preview_global_topic: "/data_collector/preview/global/image_raw"
+    preview_wrist_topic: "/data_collector/preview/wrist/image_raw"
+
     # 节点内部会强制使用 224。
     obs_image_size: 224
 

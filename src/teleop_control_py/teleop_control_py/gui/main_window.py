@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
     QDialog,
+    QFileDialog,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -41,6 +42,9 @@ from .widgets import CameraPreviewWindow, HDF5ViewerDialog
 
 
 class TeleopMainWindow(QMainWindow):
+    COLLECTOR_PREVIEW_GLOBAL_TOPIC = "/data_collector/preview/global/image_raw"
+    COLLECTOR_PREVIEW_WRIST_TOPIC = "/data_collector/preview/wrist/image_raw"
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("LIBERO Teleop & Data Collection Station")
@@ -243,63 +247,75 @@ class TeleopMainWindow(QMainWindow):
         record_group = QGroupBox("数据录制")
         record_group.setStyleSheet(section_style)
         record_layout = QGridLayout()
-        record_layout.addWidget(QLabel("HDF5 保存路径:"), 0, 0)
-        self.record_path_input = QLineEdit(f"{os.getcwd()}/data/libero_demos.hdf5")
-        record_layout.addWidget(self.record_path_input, 0, 1, 1, 3)
+        record_layout.addWidget(QLabel("HDF5 保存目录:"), 0, 0)
+        self.record_dir_input = QLineEdit(self.gui_settings.default_hdf5_output_dir)
+        self.record_dir_input.setToolTip(self.gui_settings.default_hdf5_output_dir)
+        self.record_dir_input.setCursorPosition(0)
+        record_layout.addWidget(self.record_dir_input, 0, 1, 1, 3)
+
+        self.btn_choose_record_dir = QPushButton("选择目录")
+        self.btn_choose_record_dir.clicked.connect(self.choose_record_output_dir)
+        record_layout.addWidget(self.btn_choose_record_dir, 0, 4)
+
+        record_layout.addWidget(QLabel("HDF5 文件名:"), 1, 0)
+        self.record_name_input = QLineEdit(self.gui_settings.default_hdf5_filename)
+        self.record_name_input.setToolTip(self.gui_settings.default_hdf5_filename)
+        self.record_name_input.setPlaceholderText("例如: libero_demos.hdf5")
+        record_layout.addWidget(self.record_name_input, 1, 1, 1, 3)
 
         self.btn_preview_hdf5 = QPushButton("预览已录制文件(HDF5)")
         self.btn_preview_hdf5.setStyleSheet("background-color: #e0e0e0; font-weight: bold;")
         self.btn_preview_hdf5.clicked.connect(self.open_hdf5_viewer)
-        record_layout.addWidget(self.btn_preview_hdf5, 0, 4)
+        record_layout.addWidget(self.btn_preview_hdf5, 1, 4)
 
         self.btn_collector = QPushButton("启动采集节点")
         self.btn_collector.setCheckable(True)
         self.btn_collector.clicked.connect(self.toggle_data_collector)
-        record_layout.addWidget(self.btn_collector, 1, 0)
+        record_layout.addWidget(self.btn_collector, 2, 0)
 
         self.btn_start_record = QPushButton("开始录制")
         self.btn_start_record.setStyleSheet("color: red; font-weight: bold;")
         self.btn_start_record.clicked.connect(self.start_record)
-        record_layout.addWidget(self.btn_start_record, 1, 1)
+        record_layout.addWidget(self.btn_start_record, 2, 1)
 
         self.btn_stop_record = QPushButton("停止录制")
         self.btn_stop_record.clicked.connect(self.stop_record)
-        record_layout.addWidget(self.btn_stop_record, 1, 2)
+        record_layout.addWidget(self.btn_stop_record, 2, 2)
 
         self.btn_go_home = QPushButton("回 Home 点")
         self.btn_go_home.setStyleSheet("font-weight: bold; color: #d35400;")
         self.btn_go_home.clicked.connect(self.go_home)
-        record_layout.addWidget(self.btn_go_home, 1, 3)
+        record_layout.addWidget(self.btn_go_home, 2, 3)
 
         self.btn_set_home_current = QPushButton("设当前姿态为 Home")
         self.btn_set_home_current.setStyleSheet("font-weight: bold; color: #1e8449;")
         self.btn_set_home_current.clicked.connect(self.set_home_from_current)
-        record_layout.addWidget(self.btn_set_home_current, 1, 4)
+        record_layout.addWidget(self.btn_set_home_current, 2, 4)
 
-        record_layout.addWidget(QLabel("录制全局相机源:"), 2, 0)
+        record_layout.addWidget(QLabel("录制全局相机源:"), 3, 0)
         self.global_camera_source_combo = QComboBox()
         self.global_camera_source_combo.addItem("realsense", "realsense")
         self.global_camera_source_combo.addItem("oakd", "oakd")
         global_camera_index = max(0, self.global_camera_source_combo.findData(self.gui_settings.default_global_camera_source))
         self.global_camera_source_combo.setCurrentIndex(global_camera_index)
-        record_layout.addWidget(self.global_camera_source_combo, 2, 1)
+        record_layout.addWidget(self.global_camera_source_combo, 3, 1)
 
-        record_layout.addWidget(QLabel("录制手部相机源:"), 2, 2)
+        record_layout.addWidget(QLabel("录制手部相机源:"), 3, 2)
         self.wrist_camera_source_combo = QComboBox()
         self.wrist_camera_source_combo.addItem("oakd", "oakd")
         self.wrist_camera_source_combo.addItem("realsense", "realsense")
         wrist_camera_index = max(0, self.wrist_camera_source_combo.findData(self.gui_settings.default_wrist_camera_source))
         self.wrist_camera_source_combo.setCurrentIndex(wrist_camera_index)
-        record_layout.addWidget(self.wrist_camera_source_combo, 2, 3)
+        record_layout.addWidget(self.wrist_camera_source_combo, 3, 3)
 
-        record_layout.addWidget(QLabel("当前录制序列:"), 3, 0)
+        record_layout.addWidget(QLabel("当前录制序列:"), 4, 0)
         self.lbl_demo_status = QLabel("无 (未录制)")
         self.lbl_demo_status.setStyleSheet("color: blue; font-weight: bold;")
-        record_layout.addWidget(self.lbl_demo_status, 3, 1)
+        record_layout.addWidget(self.lbl_demo_status, 4, 1)
 
         self.lbl_main_record_stats = QLabel("录制时长: 00:00 | 帧数: 0")
         self.lbl_main_record_stats.setStyleSheet("font-weight: bold; color: #555;")
-        record_layout.addWidget(self.lbl_main_record_stats, 3, 2, 1, 3)
+        record_layout.addWidget(self.lbl_main_record_stats, 4, 2, 1, 3)
 
         record_group.setLayout(record_layout)
         left_layout.addWidget(record_group)
@@ -375,6 +391,20 @@ class TeleopMainWindow(QMainWindow):
     def _selected_mediapipe_topic(self) -> str:
         return self.mediapipe_topic_combo.currentText().strip() or self.gui_settings.default_mediapipe_input_topic
 
+    def _selected_record_output_dir(self) -> str:
+        return self.record_dir_input.text().strip() or self.gui_settings.default_hdf5_output_dir
+
+    def _selected_record_filename(self) -> str:
+        filename = self.record_name_input.text().strip() or self.gui_settings.default_hdf5_filename
+        if "." not in Path(filename).name:
+            filename = f"{filename}.hdf5"
+        return filename
+
+    def _selected_record_output_path(self) -> str:
+        output_dir = Path(self._selected_record_output_dir()).expanduser()
+        filename = self._selected_record_filename()
+        return str((output_dir / filename).resolve())
+
     def _default_mediapipe_topics(self) -> List[str]:
         return [
             self.gui_settings.default_mediapipe_input_topic,
@@ -433,9 +463,13 @@ class TeleopMainWindow(QMainWindow):
         self._update_input_hint()
 
     def _preview_global_topic(self) -> str:
+        if self._process_running("data_collector"):
+            return self.COLLECTOR_PREVIEW_GLOBAL_TOPIC
         return self.gui_settings.default_preview_global_topic
 
     def _preview_wrist_topic(self) -> str:
+        if self._process_running("data_collector"):
+            return self.COLLECTOR_PREVIEW_WRIST_TOPIC
         return self.gui_settings.default_preview_wrist_topic
 
     def _selected_reverse_ip(self) -> str:
@@ -623,6 +657,21 @@ class TeleopMainWindow(QMainWindow):
         scrollbar = self.log_output.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
 
+    def choose_record_output_dir(self):
+        current_dir = self._selected_record_output_dir()
+        selected_dir = QFileDialog.getExistingDirectory(self, "选择 HDF5 保存目录", current_dir)
+        if selected_dir:
+            normalized_dir = str(Path(selected_dir).expanduser().resolve())
+            self.record_dir_input.setText(normalized_dir)
+            self.record_dir_input.setToolTip(normalized_dir)
+            self.record_dir_input.setCursorPosition(0)
+            try:
+                save_gui_settings_overrides(__file__, {"default_hdf5_output_dir": normalized_dir})
+                self.gui_settings = load_gui_settings(__file__)
+            except Exception as exc:
+                self.log(f"保存 HDF5 默认目录失败: {exc}")
+            self.log(f"HDF5 保存目录已更新为: {normalized_dir}")
+
     def run_subprocess(self, key, cmd_list):
         self.log(f"执行指令: {' '.join(cmd_list)}")
         try:
@@ -744,12 +793,18 @@ class TeleopMainWindow(QMainWindow):
 
     def toggle_data_collector(self, checked):
         if checked:
-            out_path = self.record_path_input.text()
-            global_topic = self._preview_global_topic()
-            wrist_topic = self._preview_wrist_topic()
+            out_path = self._selected_record_output_path()
+            global_topic = self.COLLECTOR_PREVIEW_GLOBAL_TOPIC
+            wrist_topic = self.COLLECTOR_PREVIEW_WRIST_TOPIC
             collector_ee_type = self._selected_collector_end_effector_type()
             global_camera_source = self._selected_camera_source(self.global_camera_source_combo, "realsense")
             wrist_camera_source = self._selected_camera_source(self.wrist_camera_source_combo, self.gui_settings.default_wrist_camera_source)
+            try:
+                Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+            except Exception as exc:
+                QMessageBox.warning(self, "输出路径无效", f"无法创建 HDF5 输出目录:\n{exc}")
+                self._set_button_running(self.btn_collector, False, "启动采集节点", "停止采集节点")
+                return
             active_camera_drivers = self._active_camera_drivers()
             conflicts: List[str] = []
             for active_camera_driver in active_camera_drivers:
@@ -819,6 +874,9 @@ class TeleopMainWindow(QMainWindow):
                 self.ros_worker.record_stats_signal.connect(self.preview_window.update_record_stats)
 
             self.ros_worker.start()
+            return
+
+        self.ros_worker.set_image_topics(global_topic, wrist_topic)
 
     def start_record(self):
         if self.ros_worker:
@@ -864,10 +922,11 @@ class TeleopMainWindow(QMainWindow):
             if self.preview_window:
                 self.preview_window.reset_record_stats()
 
-    @Slot(int, str)
-    def update_main_record_stats(self, frames, time_str):
+    @Slot(int, str, float)
+    def update_main_record_stats(self, frames, time_str, realtime_fps):
         frames_str = "N/A" if frames is None or int(frames) < 0 else str(int(frames))
-        self.lbl_main_record_stats.setText(f"录制时长: {time_str} | 估算帧数: {frames_str}")
+        fps_text = f"{float(realtime_fps):.2f} Hz" if realtime_fps is not None else "N/A"
+        self.lbl_main_record_stats.setText(f"录制时长: {time_str} | 已录制帧数: {frames_str} | 实时录制帧率: {fps_text}")
 
     @Slot(int)
     def _on_preview_window_finished(self, _result: int):
@@ -876,8 +935,10 @@ class TeleopMainWindow(QMainWindow):
 
     def open_preview_window(self):
         if self.ros_worker is None:
-            QMessageBox.information(self, "提示", "请先点击【启动采集节点】以开启 ROS图像与状态监听。")
-            return
+            self.start_ros_worker(self._preview_global_topic(), self._preview_wrist_topic())
+            self.log("已启动独立 ROS 监听器，默认等待 data_collector 预览话题。")
+
+        self.ros_worker.set_image_topics(self._preview_global_topic(), self._preview_wrist_topic())
 
         if self.preview_window is None:
             self.preview_window = CameraPreviewWindow(self)
@@ -899,7 +960,7 @@ class TeleopMainWindow(QMainWindow):
             QMessageBox.warning(self, "警告", "当前正在录制数据，为了防止文件损坏，请在【停止录制】后再进行 HDF5 预览。")
             return
 
-        viewer = HDF5ViewerDialog(self.record_path_input.text().strip(), parent=self)
+        viewer = HDF5ViewerDialog(self._selected_record_output_path(), parent=self)
         viewer.exec()
 
     def closeEvent(self, event):
