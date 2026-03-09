@@ -18,6 +18,7 @@ from builtin_interfaces.msg import Duration as DurationMsg
 from controller_manager_msgs.srv import SwitchController
 from cv_bridge import CvBridge
 from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import TwistStamped
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from rclpy.time import Time
@@ -43,6 +44,7 @@ class DataCollectorNode(Node):
         self.declare_parameter("wrist_camera_source", "oakd")
         self.declare_parameter("joint_states_topic", "/joint_states")
         self.declare_parameter("tool_pose_topic", "/tcp_pose_broadcaster/pose")
+        self.declare_parameter("servo_twist_topic", "/servo_node/delta_twist_cmds")
         self.declare_parameter("require_gripper", True)
         self.declare_parameter("end_effector_type", "robotic_gripper")
         self.declare_parameter("gripper_state_topic", "")
@@ -61,6 +63,7 @@ class DataCollectorNode(Node):
             ],
         )
         self.declare_parameter("pose_max_age_sec", 0.2)
+        self.declare_parameter("command_max_age_sec", 0.2)
         self.declare_parameter("gripper_max_age_sec", 0.5)
         self.declare_parameter("pose_stamp_zero_is_ref", True)
         self.declare_parameter("pose_use_received_time_fallback", True)
@@ -90,6 +93,7 @@ class DataCollectorNode(Node):
         self._record_fps = max(0.1, float(self.get_parameter("record_fps").value))
         self._joint_names = list(self.get_parameter("joint_names").value)
         self._pose_max_age = float(self.get_parameter("pose_max_age_sec").value)
+        self._command_max_age = float(self.get_parameter("command_max_age_sec").value)
         self._gripper_max_age = float(self.get_parameter("gripper_max_age_sec").value)
         self._pose_stamp_zero_is_ref = bool(self.get_parameter("pose_stamp_zero_is_ref").value)
         self._pose_use_received_time_fallback = bool(self.get_parameter("pose_use_received_time_fallback").value)
@@ -127,6 +131,9 @@ class DataCollectorNode(Node):
         self._latest_pose_quat: Optional[np.ndarray] = None
         self._latest_pose_time: Optional[Time] = None
         self._latest_pose_receive_time: Optional[Time] = None
+        self._latest_twist_linear: Optional[np.ndarray] = None
+        self._latest_twist_angular: Optional[np.ndarray] = None
+        self._latest_twist_time: Optional[Time] = None
         self._latest_gripper: Optional[float] = None
         self._latest_gripper_time: Optional[Time] = None
         self._latest_global_bgr: Optional[np.ndarray] = None
@@ -167,10 +174,12 @@ class DataCollectorNode(Node):
 
         joint_topic = str(self.get_parameter("joint_states_topic").value)
         pose_topic = str(self.get_parameter("tool_pose_topic").value)
+        twist_topic = str(self.get_parameter("servo_twist_topic").value)
         gripper_topic = self._resolve_gripper_topic()
 
         self.create_subscription(JointState, joint_topic, self._on_joint_state, qos_profile_sensor_data)
         self.create_subscription(PoseStamped, pose_topic, self._on_tool_pose, qos_profile_sensor_data)
+        self.create_subscription(TwistStamped, twist_topic, self._on_servo_twist, qos_profile_sensor_data)
         self.create_subscription(Float32, gripper_topic, self._on_gripper, qos_profile_sensor_data)
 
         home_topic = str(self.get_parameter("home_joint_trajectory_topic").value)
@@ -357,6 +366,22 @@ class DataCollectorNode(Node):
             self._latest_gripper = float(_clamp(float(msg.data), 0.0, 1.0))
             self._latest_gripper_time = self.get_clock().now()
 
+    def _on_servo_twist(self, msg: TwistStamped) -> None:
+        twist_time = Time.from_msg(msg.header.stamp)
+        if twist_time.nanoseconds == 0:
+            twist_time = self.get_clock().now()
+
+        with self._cache_lock:
+            self._latest_twist_linear = np.array(
+                [msg.twist.linear.x, msg.twist.linear.y, msg.twist.linear.z],
+                dtype=np.float32,
+            )
+            self._latest_twist_angular = np.array(
+                [msg.twist.angular.x, msg.twist.angular.y, msg.twist.angular.z],
+                dtype=np.float32,
+            )
+            self._latest_twist_time = twist_time
+
     def _map_joint_positions(self, msg: JointState) -> Optional[np.ndarray]:
         if not msg.name or not msg.position:
             return None
@@ -431,6 +456,26 @@ class DataCollectorNode(Node):
                     return None, "gripper_stale", None
 
         return (joint_pos, pose_pos, pose_quat, float(gripper)), None, None
+
+    def _get_cached_action(self, ref_time: Time, gripper: float) -> Tuple[Optional[np.ndarray], Optional[str], Optional[str]]:
+        with self._cache_lock:
+            linear = None if self._latest_twist_linear is None else self._latest_twist_linear.copy()
+            angular = None if self._latest_twist_angular is None else self._latest_twist_angular.copy()
+            twist_time = self._latest_twist_time
+
+        if linear is None or angular is None or twist_time is None:
+            return None, "no_action_cmd", "尚未收到有效 servo twist 命令，当前帧跳过。"
+
+        if self._command_max_age > 0.0:
+            cmd_age = abs((ref_time - twist_time).nanoseconds) * 1e-9
+            if cmd_age > self._command_max_age:
+                return (
+                    None,
+                    "action_cmd_stale",
+                    f"servo twist 命令过旧，topic={self.get_parameter('servo_twist_topic').value}, age={cmd_age:.3f}s。",
+                )
+
+            return compose_eef_action(linear, angular, gripper), None, None
 
     def _pull_camera_frames(self) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
         if self.global_cam is None or self.wrist_cam is None:
@@ -552,8 +597,12 @@ class DataCollectorNode(Node):
             self._inc_stat("image_fail")
             return
 
-        # Record the realized robot-side action, so any teleop-side deadzone/limiting is already reflected here.
-        action = compose_eef_action(eef_pos, eef_quat, gripper)
+        action, action_reason, action_detail = self._get_cached_action(ref_time, gripper)
+        if action is None:
+            action_reason = action_reason or "action_missing"
+            self._inc_stat(action_reason)
+            self._warn_throttled(action_reason, action_detail or "动作命令缺失，当前帧跳过。")
+            return
 
         # 严格按照相机角色写入数据集字段，避免 agentview / wrist 对调。
         sample = Sample(
@@ -561,6 +610,7 @@ class DataCollectorNode(Node):
             agentview_rgb=agentview_rgb,
             eye_in_hand_rgb=eye_in_hand_rgb,
             robot0_joint_pos=joint_pos.astype(np.float32, copy=False),
+            robot0_gripper_qpos=np.array([gripper], dtype=np.float32),
             robot0_eef_pos=eef_pos.astype(np.float32, copy=False),
             robot0_eef_quat=eef_quat.astype(np.float32, copy=False),
             actions=action,

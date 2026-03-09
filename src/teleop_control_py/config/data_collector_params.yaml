@@ -21,6 +21,7 @@ data_collector:
     joint_states_topic: "/joint_states"
 
     tool_pose_topic: "/tcp_pose_broadcaster/pose"
+    servo_twist_topic: "/servo_node/delta_twist_cmds"
 
     # 必须与 /joint_states.name 中的关节名一致。
     joint_names:
@@ -50,6 +51,7 @@ data_collector:
     # 5) 时间戳有效性
     # ==========================================================
     pose_max_age_sec: 0.05
+    command_max_age_sec: 0.2
     gripper_max_age_sec: 0.5
     # 位姿时间戳为零时，使用当前采样时刻作为参考。
     pose_stamp_zero_is_ref: true

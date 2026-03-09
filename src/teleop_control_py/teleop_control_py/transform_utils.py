@@ -236,22 +236,21 @@ def apply_velocity_limits(
 
 
 def compose_eef_action(
-    eef_pos: Sequence[float],
-    eef_quat_xyzw: Sequence[float],
+    linear_xyz: Sequence[float],
+    angular_xyz: Sequence[float],
     gripper: float,
 ) -> np.ndarray:
-    """将执行后的末端状态组装为数据集 action 向量 [xyz, rotvec, gripper]。"""
-    pos = np.asarray(eef_pos, dtype=np.float32)
-    quat = np.asarray(eef_quat_xyzw, dtype=np.float32)
-    rotvec = _quat_to_rotvec_xyzw(quat)
+    """组装当前数据集使用的 7 维动作向量 [vx, vy, vz, wx, wy, wz, gripper]。"""
+    linear = np.asarray(linear_xyz, dtype=np.float32)
+    angular = np.asarray(angular_xyz, dtype=np.float32)
     return np.array(
         [
-            float(pos[0]),
-            float(pos[1]),
-            float(pos[2]),
-            float(rotvec[0]),
-            float(rotvec[1]),
-            float(rotvec[2]),
+            float(linear[0]),
+            float(linear[1]),
+            float(linear[2]),
+            float(angular[0]),
+            float(angular[1]),
+            float(angular[2]),
             float(_clamp(gripper, 0.0, 1.0)),
         ],
         dtype=np.float32,

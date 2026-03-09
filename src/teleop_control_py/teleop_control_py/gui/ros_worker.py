@@ -6,6 +6,7 @@ import numpy as np
 import rclpy
 from cv_bridge import CvBridge
 from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import TwistStamped
 from PySide6.QtCore import QThread, Signal
 from rcl_interfaces.srv import SetParameters
 from rclpy.node import Node
@@ -24,10 +25,13 @@ class ROS2Worker(QThread):
     log_signal = Signal(str)
     demo_status_signal = Signal(str)
 
-    def __init__(self, global_topic, wrist_topic):
+    def __init__(self, global_topic, wrist_topic, pose_topic, gripper_topic, action_topic):
         super().__init__()
         self.global_topic = global_topic
         self.wrist_topic = wrist_topic
+        self.pose_topic = str(pose_topic).strip()
+        self.gripper_topic = str(gripper_topic).strip()
+        self.action_topic = str(action_topic).strip()
         self._global_sub_topic = None
         self._wrist_sub_topic = None
         self.node = None
@@ -49,6 +53,8 @@ class ROS2Worker(QThread):
             "pose": [0.0, 0.0, 0.0],
             "quat": [0.0, 0.0, 0.0, 1.0],
             "gripper": 0.0,
+            "action_linear": [0.0, 0.0, 0.0],
+            "action_angular": [0.0, 0.0, 0.0],
         }
 
     def _emit_image_topics_log(self) -> None:
@@ -130,8 +136,9 @@ class ROS2Worker(QThread):
         self.image_subs_timer = self.node.create_timer(0.2, self._image_subs_timer_callback)
 
         self.joint_sub = self.node.create_subscription(JointState, "/joint_states", self.joint_callback, 10)
-        self.pose_sub = self.node.create_subscription(PoseStamped, "/tcp_pose_broadcaster/pose", self.pose_callback, 10)
-        self.gripper_sub = self.node.create_subscription(Float32, "/gripper/cmd", self.gripper_callback, 10)
+        self.pose_sub = self.node.create_subscription(PoseStamped, self.pose_topic, self.pose_callback, 10)
+        self.gripper_sub = self.node.create_subscription(Float32, self.gripper_topic, self.gripper_callback, 10)
+        self.action_sub = self.node.create_subscription(TwistStamped, self.action_topic, self.action_callback, 10)
         self.record_stats_sub = self.node.create_subscription(
             Float32MultiArray,
             "/data_collector/record_stats",
@@ -208,38 +215,34 @@ class ROS2Worker(QThread):
         self.robot_state["gripper"] = max(0.0, min(1.0, float(msg.data)))
         self._emit_robot_state()
 
-    def _quat_to_rotvec_xyzw(self, q_xyzw):
-        quat = np.array(q_xyzw, dtype=np.float64)
-        norm = float(np.linalg.norm(quat))
-        if norm <= 0.0:
-            normalized = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float64)
-        else:
-            normalized = quat / norm
-
-        x, y, z, w = (float(normalized[0]), float(normalized[1]), float(normalized[2]), float(normalized[3]))
-        w = max(-1.0, min(1.0, w))
-        angle = 2.0 * math.acos(w)
-        sine = math.sqrt(max(0.0, 1.0 - w * w))
-
-        if sine < 1e-8 or angle < 1e-8:
-            return np.zeros(3, dtype=np.float32)
-
-        axis = np.array([x / sine, y / sine, z / sine], dtype=np.float64)
-        return (axis * angle).astype(np.float32)
+    def action_callback(self, msg):
+        self.robot_state["action_linear"] = [msg.twist.linear.x, msg.twist.linear.y, msg.twist.linear.z]
+        self.robot_state["action_angular"] = [msg.twist.angular.x, msg.twist.angular.y, msg.twist.angular.z]
+        self._emit_robot_state()
 
     def _emit_robot_state(self):
         joints = np.array(self.robot_state.get("joints", [0.0] * 6))
         pos = np.array(self.robot_state.get("pose", [0.0, 0.0, 0.0]))
         quat = np.array(self.robot_state.get("quat", [0.0, 0.0, 0.0, 1.0]))
         gripper = self.robot_state.get("gripper", 0.0)
+        action_linear = np.array(self.robot_state.get("action_linear", [0.0, 0.0, 0.0]))
+        action_angular = np.array(self.robot_state.get("action_angular", [0.0, 0.0, 0.0]))
 
-        rotvec = self._quat_to_rotvec_xyzw(quat)
-        action = np.array([pos[0], pos[1], pos[2], rotvec[0], rotvec[1], rotvec[2], gripper])
+        action = np.array([
+            action_linear[0],
+            action_linear[1],
+            action_linear[2],
+            action_angular[0],
+            action_angular[1],
+            action_angular[2],
+            gripper,
+        ])
 
         formatter = {"float_kind": lambda value: f"{value:6.3f}"}
         joints_str = np.array2string(joints, formatter=formatter)
         pos_str = np.array2string(pos, formatter=formatter)
         quat_str = np.array2string(quat, formatter=formatter)
+        gripper_str = np.array2string(np.array([gripper]), formatter=formatter)
         action_str = np.array2string(action, formatter=formatter)
 
         text = "【实时机器人状态 (与HDF5写入对齐)】\n"
@@ -247,9 +250,10 @@ class ROS2Worker(QThread):
         text += f"► 关节位置 [6]:\n {joints_str}\n\n"
         text += f"► 末端 XYZ [3]:\n {pos_str}\n\n"
         text += f"► 末端 四元数 [4]:\n {quat_str}\n\n"
+        text += f"► 夹爪状态 [1]:\n {gripper_str}\n\n"
         text += "-" * 25 + "\n"
         text += f"► 实时 Action [7]:\n {action_str}\n"
-        text += "  (XYZ, RxRyRz, Gripper)"
+        text += "  (VxVyVz, WxWyWz, Gripper)"
         self.robot_state_str_signal.emit(text)
 
     def stats_timer_callback(self):

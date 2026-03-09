@@ -44,6 +44,9 @@ from .widgets import CameraPreviewWindow, HDF5ViewerDialog
 class TeleopMainWindow(QMainWindow):
     COLLECTOR_PREVIEW_GLOBAL_TOPIC = "/data_collector/preview/global/image_raw"
     COLLECTOR_PREVIEW_WRIST_TOPIC = "/data_collector/preview/wrist/image_raw"
+    COLLECTOR_POSE_TOPIC = "/tcp_pose_broadcaster/pose"
+    COLLECTOR_GRIPPER_TOPIC = "/gripper/cmd"
+    COLLECTOR_ACTION_TOPIC = "/servo_node/delta_twist_cmds"
 
     def __init__(self):
         super().__init__()
@@ -862,7 +865,13 @@ class TeleopMainWindow(QMainWindow):
 
     def start_ros_worker(self, global_topic, wrist_topic):
         if self.ros_worker is None:
-            self.ros_worker = ROS2Worker(global_topic, wrist_topic)
+            self.ros_worker = ROS2Worker(
+                global_topic,
+                wrist_topic,
+                self.COLLECTOR_POSE_TOPIC,
+                self.COLLECTOR_GRIPPER_TOPIC,
+                self.COLLECTOR_ACTION_TOPIC,
+            )
             self.ros_worker.log_signal.connect(self.log)
             self.ros_worker.demo_status_signal.connect(self.update_demo_status)
             self.ros_worker.record_stats_signal.connect(self.update_main_record_stats)

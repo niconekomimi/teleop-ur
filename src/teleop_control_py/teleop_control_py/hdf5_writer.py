@@ -22,6 +22,7 @@ class Sample:
     agentview_rgb: np.ndarray
     eye_in_hand_rgb: np.ndarray
     robot0_joint_pos: np.ndarray
+    robot0_gripper_qpos: np.ndarray
     robot0_eef_pos: np.ndarray
     robot0_eef_quat: np.ndarray
     actions: np.ndarray
@@ -157,6 +158,7 @@ class HDF5WriterThread(threading.Thread):
             "agentview_rgb": _dataset(obs_group, "agentview_rgb", (224, 224, 3), np.uint8, self._compression),
             "eye_in_hand_rgb": _dataset(obs_group, "eye_in_hand_rgb", (224, 224, 3), np.uint8, self._compression),
             "robot0_joint_pos": _dataset(obs_group, "robot0_joint_pos", (6,), np.float32, None),
+            "robot0_gripper_qpos": _dataset(obs_group, "robot0_gripper_qpos", (1,), np.float32, None),
             "robot0_eef_pos": _dataset(obs_group, "robot0_eef_pos", (3,), np.float32, None),
             "robot0_eef_quat": _dataset(obs_group, "robot0_eef_quat", (4,), np.float32, None),
         }
@@ -203,6 +205,10 @@ class HDF5WriterThread(threading.Thread):
         _resize_and_write(
             handles["robot0_joint_pos"],
             np.stack([sample.robot0_joint_pos for sample in batch], axis=0),
+        )  # type: ignore[arg-type]
+        _resize_and_write(
+            handles["robot0_gripper_qpos"],
+            np.stack([sample.robot0_gripper_qpos for sample in batch], axis=0),
         )  # type: ignore[arg-type]
         _resize_and_write(
             handles["robot0_eef_pos"],

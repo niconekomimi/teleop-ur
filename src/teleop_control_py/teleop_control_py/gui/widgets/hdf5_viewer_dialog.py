@@ -555,9 +555,14 @@ class HDF5ViewerDialog(QDialog):
             pos = self.current_demo_group["obs"]["robot0_eef_pos"][source_idx]
             quat = self.current_demo_group["obs"]["robot0_eef_quat"][source_idx]
             actions = self.current_demo_group["actions"][source_idx]
+            if "robot0_gripper_qpos" in self.current_demo_group["obs"]:
+                gripper_qpos = self.current_demo_group["obs"]["robot0_gripper_qpos"][source_idx]
+            else:
+                gripper_qpos = np.array([actions[-1]], dtype=np.float32)
 
             formatter = {"float_kind": lambda value: f"{value:6.3f}"}
             joints_str = np.array2string(joints, formatter=formatter)
+            gripper_str = np.array2string(gripper_qpos, formatter=formatter)
             pos_str = np.array2string(pos, formatter=formatter)
             quat_str = np.array2string(quat, formatter=formatter)
             actions_str = np.array2string(actions, formatter=formatter)
@@ -565,11 +570,12 @@ class HDF5ViewerDialog(QDialog):
             text = "【录制帧数据】\n"
             text += "-" * 25 + "\n"
             text += f"► 关节位置 [6]:\n {joints_str}\n\n"
+            text += f"► 夹爪状态 [1]:\n {gripper_str}\n\n"
             text += f"► 末端 XYZ [3]:\n {pos_str}\n\n"
             text += f"► 末端 四元数 [4]:\n {quat_str}\n\n"
             text += "-" * 25 + "\n"
             text += f"► 保存的 Action [7]:\n {actions_str}\n"
-            text += "  (XYZ, RxRyRz, Gripper)"
+            text += "  (VxVyVz, WxWyWz, Gripper)"
             self.text_state.setText(text)
         except Exception as exc:
             self.text_state.setText(f"读取帧数据失败: {exc}")
