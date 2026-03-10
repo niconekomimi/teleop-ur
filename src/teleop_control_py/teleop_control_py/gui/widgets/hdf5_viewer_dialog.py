@@ -6,6 +6,7 @@ import numpy as np
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
+    QApplication,
     QComboBox,
     QDialog,
     QFileDialog,
@@ -18,7 +19,10 @@ from PySide6.QtWidgets import (
     QTextEdit,
     QVBoxLayout,
     QMessageBox,
+    QInputDialog,
 )
+
+from teleop_control_py.dataset_rebuilder import rebuild_file, quat_to_rotvec_xyzw
 
 
 class HDF5ViewerDialog(QDialog):
@@ -70,6 +74,11 @@ class HDF5ViewerDialog(QDialog):
         self.btn_save_changes.setStyleSheet("font-weight: bold; background-color: #ffe8a1;")
         self.btn_save_changes.clicked.connect(self.save_pending_changes)
         top_layout.addWidget(self.btn_save_changes)
+
+        self.btn_rebuild_schema = QPushButton("转换为训练格式")
+        self.btn_rebuild_schema.setStyleSheet("font-weight: bold; background-color: #d7f4d1;")
+        self.btn_rebuild_schema.clicked.connect(self.rebuild_dataset_schema)
+        top_layout.addWidget(self.btn_rebuild_schema)
 
         self.lbl_pending_state = QLabel("无待保存修改")
         self.lbl_pending_state.setStyleSheet("color: #555;")
@@ -205,6 +214,138 @@ class HDF5ViewerDialog(QDialog):
             self._refresh_demo_combo()
         except Exception as exc:
             QMessageBox.critical(self, "HDF5 读取错误", str(exc))
+
+    def rebuild_dataset_schema(self):
+        if self.hdf5_path and os.path.exists(self.hdf5_path):
+            input_path = self.hdf5_path
+        else:
+            start_dir = os.getcwd()
+            input_path, _ = QFileDialog.getOpenFileName(
+                self,
+                "选择要转换的 HDF5 文件",
+                start_dir,
+                "HDF5 Files (*.hdf5 *.h5);;All Files (*)",
+            )
+            if not input_path:
+                return
+
+        input_file = Path(input_path)
+        default_output = input_file.with_name(f"{input_file.stem}_rebuilt{input_file.suffix}")
+        output_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "选择转换后输出文件",
+            str(default_output),
+            "HDF5 Files (*.hdf5 *.h5);;All Files (*)",
+        )
+        if not output_path:
+            return
+
+        if os.path.abspath(output_path) == os.path.abspath(input_path):
+            QMessageBox.warning(self, "输出文件无效", "输出文件不能和输入文件相同，请选择新的 HDF5 文件名。")
+            return
+
+        compression_settings = self._prompt_rebuild_compression()
+        if compression_settings is None:
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "确认转换",
+            "将按训练格式重建一个新的 HDF5 文件。\n\n"
+            "转换内容包括：\n"
+            "- 保留 actions\n"
+            "- 生成 dones、rewards、states\n"
+            "- 生成 robot_states = joint_states + gripper_states\n"
+            "- 将末端四元数转换为轴角 ee_ori\n"
+            "- 保持图像原始尺寸\n"
+            f"- 压缩策略: {compression_settings['description']}\n"
+            "- 输出 demo 会连续重命名为 demo_0..N\n\n"
+            "是否继续？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            results = rebuild_file(
+                input_path=input_path,
+                output_path=output_path,
+                include_states=True,
+                renumber=True,
+                compression=compression_settings["compression"],
+                compression_opts=compression_settings["compression_opts"],
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "转换失败", f"重建数据集失败:\n{exc}")
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        total_frames = sum(num_samples for _, _, num_samples in results)
+        reply = QMessageBox.question(
+            self,
+            "转换完成",
+            f"已完成转换。\n\n输出文件: {output_path}\n"
+            f"demo 数量: {len(results)}\n"
+            f"总帧数: {total_frames}\n\n"
+            "是否立即打开输出文件？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if reply == QMessageBox.Yes:
+            self.open_hdf5_file(output_path)
+
+    def _prompt_rebuild_compression(self):
+        options = [
+            ("继承源数据集压缩参数（默认）", "inherit"),
+            ("统一使用 lzf 压缩", "lzf"),
+            ("统一使用 gzip 压缩", "gzip"),
+            ("统一不压缩", None),
+        ]
+        labels = [label for label, _ in options]
+        selected_label, ok = QInputDialog.getItem(
+            self,
+            "选择压缩策略",
+            "输出文件的压缩策略：",
+            labels,
+            0,
+            False,
+        )
+        if not ok:
+            return None
+
+        compression_map = {label: value for label, value in options}
+        compression = compression_map[selected_label]
+        compression_opts = None
+        if compression == "gzip":
+            compression_opts, ok = QInputDialog.getInt(
+                self,
+                "设置 gzip 级别",
+                "gzip 压缩级别 (0-9)：",
+                4,
+                0,
+                9,
+                1,
+            )
+            if not ok:
+                return None
+
+        return {
+            "compression": compression,
+            "compression_opts": compression_opts,
+            "description": self._describe_rebuild_compression(compression, compression_opts),
+        }
+
+    def _describe_rebuild_compression(self, compression, compression_opts):
+        if compression == "inherit":
+            return "继承源数据集压缩参数"
+        if compression is None:
+            return "统一不压缩"
+        if compression == "gzip":
+            return f"统一使用 gzip 压缩 (level={compression_opts})"
+        return f"统一使用 {compression} 压缩"
 
     def _demo_sort_key(self, item):
         try:
@@ -529,6 +670,61 @@ class HDF5ViewerDialog(QDialog):
     def on_slider_changed(self):
         self.update_frame_display()
 
+    def _read_obs_dataset(self, obs_group, candidates, source_idx):
+        for name in candidates:
+            if name in obs_group:
+                return np.asarray(obs_group[name][source_idx])
+        raise KeyError(f"缺少观测字段，候选项: {', '.join(candidates)}")
+
+    def _get_frame_payload(self, source_idx):
+        obs_group = self.current_demo_group["obs"]
+        actions = np.asarray(self.current_demo_group["actions"][source_idx], dtype=np.float32)
+
+        joints = self._read_obs_dataset(obs_group, ["joint_states", "robot0_joint_pos"], source_idx).astype(np.float32)
+        pos = self._read_obs_dataset(obs_group, ["ee_pos", "robot0_eef_pos"], source_idx).astype(np.float32)
+
+        if "ee_ori" in obs_group:
+            ori = np.asarray(obs_group["ee_ori"][source_idx], dtype=np.float32)
+            quat = None
+            schema_name = "训练格式"
+        else:
+            quat = np.asarray(self._read_obs_dataset(obs_group, ["robot0_eef_quat"], source_idx), dtype=np.float32)
+            ori = quat_to_rotvec_xyzw(quat)
+            schema_name = "采集格式"
+
+        if "gripper_states" in obs_group:
+            gripper = np.asarray(obs_group["gripper_states"][source_idx], dtype=np.float32)
+        elif "robot0_gripper_qpos" in obs_group:
+            gripper = np.asarray(obs_group["robot0_gripper_qpos"][source_idx], dtype=np.float32)
+        else:
+            gripper = np.array([actions[-1]], dtype=np.float32)
+
+        ee_states = np.concatenate([pos, ori], axis=0).astype(np.float32)
+        robot_states = None
+        if "robot_states" in self.current_demo_group:
+            robot_states = np.asarray(self.current_demo_group["robot_states"][source_idx], dtype=np.float32)
+
+        dones = None
+        rewards = None
+        if "dones" in self.current_demo_group:
+            dones = np.asarray(self.current_demo_group["dones"][source_idx])
+        if "rewards" in self.current_demo_group:
+            rewards = np.asarray(self.current_demo_group["rewards"][source_idx])
+
+        return {
+            "actions": actions,
+            "joints": joints,
+            "gripper": gripper,
+            "pos": pos,
+            "ori": ori,
+            "quat": quat,
+            "ee_states": ee_states,
+            "robot_states": robot_states,
+            "dones": dones,
+            "rewards": rewards,
+            "schema_name": schema_name,
+        }
+
     def update_frame_display(self):
         if self.current_demo_group is None:
             return
@@ -551,28 +747,47 @@ class HDF5ViewerDialog(QDialog):
             qimg_wrist = QImage(wrist_rgb.data, width, height, bytes_per_line, QImage.Format_RGB888)
             self.lbl_wrist.setPixmap(QPixmap.fromImage(qimg_wrist).scaled(self.lbl_wrist.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
 
-            joints = self.current_demo_group["obs"]["robot0_joint_pos"][source_idx]
-            pos = self.current_demo_group["obs"]["robot0_eef_pos"][source_idx]
-            quat = self.current_demo_group["obs"]["robot0_eef_quat"][source_idx]
-            actions = self.current_demo_group["actions"][source_idx]
-            if "robot0_gripper_qpos" in self.current_demo_group["obs"]:
-                gripper_qpos = self.current_demo_group["obs"]["robot0_gripper_qpos"][source_idx]
-            else:
-                gripper_qpos = np.array([actions[-1]], dtype=np.float32)
+            payload = self._get_frame_payload(source_idx)
+            joints = payload["joints"]
+            pos = payload["pos"]
+            ori = payload["ori"]
+            quat = payload["quat"]
+            actions = payload["actions"]
+            gripper_qpos = payload["gripper"]
+            ee_states = payload["ee_states"]
+            robot_states = payload["robot_states"]
+            dones = payload["dones"]
+            rewards = payload["rewards"]
+            schema_name = payload["schema_name"]
 
             formatter = {"float_kind": lambda value: f"{value:6.3f}"}
             joints_str = np.array2string(joints, formatter=formatter)
             gripper_str = np.array2string(gripper_qpos, formatter=formatter)
             pos_str = np.array2string(pos, formatter=formatter)
-            quat_str = np.array2string(quat, formatter=formatter)
+            ori_str = np.array2string(ori, formatter=formatter)
             actions_str = np.array2string(actions, formatter=formatter)
+            ee_states_str = np.array2string(ee_states, formatter=formatter)
 
             text = "【录制帧数据】\n"
+            text += f"格式: {schema_name}\n"
             text += "-" * 25 + "\n"
             text += f"► 关节位置 [6]:\n {joints_str}\n\n"
             text += f"► 夹爪状态 [1]:\n {gripper_str}\n\n"
             text += f"► 末端 XYZ [3]:\n {pos_str}\n\n"
-            text += f"► 末端 四元数 [4]:\n {quat_str}\n\n"
+            text += f"► 末端 轴角 [3]:\n {ori_str}\n\n"
+            if quat is not None:
+                quat_str = np.array2string(quat, formatter=formatter)
+                text += f"► 末端 四元数 [4]:\n {quat_str}\n\n"
+            text += f"► 末端状态 [6]:\n {ee_states_str}\n\n"
+            if robot_states is not None:
+                robot_states_str = np.array2string(robot_states, formatter=formatter)
+                text += f"► 机器人状态 [7]:\n {robot_states_str}\n\n"
+            if dones is not None:
+                text += f"► done: {int(dones)}\n"
+            if rewards is not None:
+                text += f"► reward: {float(rewards):.3f}\n"
+            if dones is not None or rewards is not None:
+                text += "\n"
             text += "-" * 25 + "\n"
             text += f"► 保存的 Action [7]:\n {actions_str}\n"
             text += "  (VxVyVz, WxWyWz, Gripper)"
