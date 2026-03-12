@@ -10,6 +10,8 @@ import numpy as np
 import rclpy
 from geometry_msgs.msg import Twist
 from rclpy.node import Node
+from std_msgs.msg import Bool
+from std_srvs.srv import Trigger
 
 from .gripper_controllers import QbSoftHandController, RobotiqController
 from .input_handlers import JoyInputHandler, MediaPipeInputHandler
@@ -50,17 +52,28 @@ class TeleopControlNode(Node):
             ],
             dtype=np.float64,
         )
+        self._zero_return_accel_scale = max(0.01, float(self.get_parameter("zero_return_accel_scale").value))
         self._last_twist_vec = np.zeros(6, dtype=np.float64)
         self._last_loop_time = time.monotonic()
+        self._home_zone_active = False
+        self._home_zone_cancel_inflight = False
+        self._last_home_zone_cancel_monotonic = 0.0
 
         self.input_handler = self._build_input_handler(self._input_type)
         self.gripper_ctrl = self._build_gripper_controller(self._gripper_type)
         self.arm_ctrl = ServoPoseFollower(self)
+        self._home_zone_active_sub = self.create_subscription(
+            Bool,
+            "/data_collector/home_zone_active",
+            self._on_home_zone_active,
+            10,
+        )
+        self._home_zone_cancel_client = self.create_client(Trigger, "/data_collector/cancel_home_zone")
 
         self._timer = self.create_timer(1.0 / self._control_hz, self._control_loop)
         self.get_logger().info(
             f"TeleopControlNode ready. input_type={self._input_type}, gripper_type={self._gripper_type}, "
-            f"control_hz={self._control_hz:.1f}"
+            f"control_hz={self._control_hz:.1f}, zero_return_accel_scale={self._zero_return_accel_scale:.2f}"
         )
 
     def _declare_parameters(self) -> None:
@@ -80,6 +93,7 @@ class TeleopControlNode(Node):
         self.declare_parameter("max_angular_vel", 3.0)
         self.declare_parameter("max_linear_accel", 4.0)
         self.declare_parameter("max_angular_accel", 8.0)
+        self.declare_parameter("zero_return_accel_scale", 0.35)
 
         self.declare_parameter("joy_topic", "/joy")
         self.declare_parameter("input_watchdog_timeout_sec", 0.2)
@@ -92,13 +106,15 @@ class TeleopControlNode(Node):
         self.declare_parameter("linear_x_axis", 0)
         self.declare_parameter("linear_y_axis", 1)
         self.declare_parameter("linear_z_axis", -1)
+        self.declare_parameter("linear_z_up_axis", 5)
+        self.declare_parameter("linear_z_down_axis", 4)
         self.declare_parameter("linear_z_up_button", 1)
         self.declare_parameter("linear_z_down_button", 0)
         self.declare_parameter("angular_x_axis", 3)
         self.declare_parameter("angular_y_axis", 2)
         self.declare_parameter("angular_z_axis", -1)
-        self.declare_parameter("angular_z_positive_button", 3)
-        self.declare_parameter("angular_z_negative_button", 2)
+        self.declare_parameter("angular_z_positive_button", 1)
+        self.declare_parameter("angular_z_negative_button", 0)
         self.declare_parameter("linear_axis_sign", [-1.0, -1.0, 1.0])
         self.declare_parameter("angular_axis_sign", [-1.0, 1.0, 1.0])
         self.declare_parameter("gripper_close_button", 5)
@@ -193,6 +209,41 @@ class TeleopControlNode(Node):
         twist.angular.z = float(values[5])
         return twist
 
+    def _on_home_zone_active(self, msg: Bool) -> None:
+        active = bool(msg.data)
+        if active == self._home_zone_active:
+            return
+        self._home_zone_active = active
+        if active:
+            self._last_twist_vec = np.zeros(6, dtype=np.float64)
+            self.get_logger().info("Home Zone active. Teleop output paused until Home Zone finishes or is canceled.")
+        else:
+            self.get_logger().info("Home Zone inactive. Teleop output resumed.")
+
+    def _on_home_zone_cancel_done(self, future) -> None:
+        self._home_zone_cancel_inflight = False
+        try:
+            future.result()
+        except Exception:
+            pass
+
+    def _maybe_cancel_home_zone_for_operator_input(self, target_vec: np.ndarray) -> None:
+        if not self._home_zone_active:
+            return
+        if float(np.max(np.abs(target_vec))) <= 1e-3:
+            return
+        if self._home_zone_cancel_inflight:
+            return
+        now = time.monotonic()
+        if (now - self._last_home_zone_cancel_monotonic) < 0.5:
+            return
+        if not self._home_zone_cancel_client.wait_for_service(timeout_sec=0.0):
+            return
+        self._last_home_zone_cancel_monotonic = now
+        self._home_zone_cancel_inflight = True
+        future = self._home_zone_cancel_client.call_async(Trigger.Request())
+        future.add_done_callback(self._on_home_zone_cancel_done)
+
     def _control_loop(self) -> None:
         twist, gripper_val = self.input_handler.get_command()
         now = time.monotonic()
@@ -200,18 +251,20 @@ class TeleopControlNode(Node):
         self._last_loop_time = now
 
         target_vec = self._twist_to_vector(twist)
+        if self._home_zone_active:
+            self._last_twist_vec = np.zeros(6, dtype=np.float64)
+            self._maybe_cancel_home_zone_for_operator_input(target_vec)
+            return
+        effective_acceleration = self._max_acceleration.copy()
+        zero_axes = np.isclose(target_vec, 0.0, atol=1e-6)
+        effective_acceleration[zero_axes] *= self._zero_return_accel_scale
         limited_vec = apply_velocity_limits(
             target=target_vec,
             previous=self._last_twist_vec,
             max_velocity=self._max_velocity,
-            max_acceleration=self._max_acceleration,
+            max_acceleration=effective_acceleration,
             dt=dt,
         )
-
-        # When the input strategy has already snapped an axis back to zero,
-        # clear that axis immediately instead of letting accel limiting create coast.
-        zero_axes = np.isclose(target_vec, 0.0, atol=1e-6)
-        limited_vec[zero_axes] = 0.0
         self._last_twist_vec = limited_vec
 
         limited_twist = self._vector_to_twist(limited_vec)

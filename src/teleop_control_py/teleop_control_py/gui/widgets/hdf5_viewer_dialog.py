@@ -20,12 +20,17 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QMessageBox,
     QInputDialog,
+    QProgressDialog,
+    QWidget,
 )
 
-from teleop_control_py.dataset_rebuilder import rebuild_file, quat_to_rotvec_xyzw
+from teleop_control_py.dataset_rebuilder import rebuild_file, quat_to_rotvec_xyzw, sorted_demo_names
 
 
 class HDF5ViewerDialog(QDialog):
+    ZERO_ACTION_ATOL = 1e-6
+    ZERO_ACTION_CONTEXT_FRAMES = 5
+
     def __init__(self, initial_hdf5_path, parent=None):
         super().__init__(parent)
         self.setWindowTitle("HDF5 数据集高级回放器")
@@ -43,6 +48,8 @@ class HDF5ViewerDialog(QDialog):
         self.playback_timer.timeout.connect(self.on_play_timeout)
         self.is_playing = False
         self.base_interval_ms = 100
+        self._agent_source_pixmap = QPixmap()
+        self._wrist_source_pixmap = QPixmap()
 
         self.setup_ui()
         if os.path.exists(self.hdf5_path):
@@ -65,6 +72,14 @@ class HDF5ViewerDialog(QDialog):
         self.demo_combo = QComboBox()
         self.demo_combo.currentIndexChanged.connect(self.load_demo)
         top_layout.addWidget(self.demo_combo)
+
+        self.btn_prev_demo = QPushButton("上一条 demo")
+        self.btn_prev_demo.clicked.connect(self.goto_prev_demo)
+        top_layout.addWidget(self.btn_prev_demo)
+
+        self.btn_next_demo = QPushButton("下一条 demo")
+        self.btn_next_demo.clicked.connect(self.goto_next_demo)
+        top_layout.addWidget(self.btn_next_demo)
 
         self.btn_delete_current = QPushButton("删除当前 demo")
         self.btn_delete_current.clicked.connect(self.delete_current_demo)
@@ -139,6 +154,10 @@ class HDF5ViewerDialog(QDialog):
         self.btn_clear_crop.clicked.connect(self.clear_crop_range)
         edit_layout.addWidget(self.btn_clear_crop)
 
+        self.btn_auto_trim_zero_actions = QPushButton("自动裁切零动作首尾")
+        self.btn_auto_trim_zero_actions.clicked.connect(self.auto_trim_zero_action_ranges)
+        edit_layout.addWidget(self.btn_auto_trim_zero_actions)
+
         self.lbl_crop_state = QLabel("当前 demo 无待保存裁剪")
         self.lbl_crop_state.setStyleSheet("color: #555;")
         edit_layout.addWidget(self.lbl_crop_state)
@@ -146,32 +165,56 @@ class HDF5ViewerDialog(QDialog):
         main_layout.addLayout(edit_layout)
 
         content_layout = QHBoxLayout()
-        cam_layout = QVBoxLayout()
+        content_layout.setSpacing(12)
+
+        self.cam_panel = QWidget()
+        self.cam_panel.setMinimumWidth(620)
+        self.cam_panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        cam_layout = QHBoxLayout(self.cam_panel)
+        cam_layout.setContentsMargins(0, 0, 0, 0)
+        cam_layout.setSpacing(12)
+
+        agent_panel = QWidget()
+        agent_layout = QVBoxLayout(agent_panel)
+        agent_layout.setContentsMargins(0, 0, 0, 0)
+        agent_layout.setSpacing(6)
 
         global_title = QLabel("【全局相机 (Agent View)】")
         global_title.setAlignment(Qt.AlignCenter)
         self.lbl_agent = QLabel("无画面")
         self.lbl_agent.setAlignment(Qt.AlignCenter)
-        self.lbl_agent.setStyleSheet("background-color: black; color: white;")
+        self.lbl_agent.setStyleSheet("background-color: #202020; color: white; border-radius: 4px;")
+        self.lbl_agent.setMinimumHeight(220)
         self.lbl_agent.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        agent_layout.addWidget(global_title)
+        agent_layout.addWidget(self.lbl_agent)
+
+        wrist_panel = QWidget()
+        wrist_layout = QVBoxLayout(wrist_panel)
+        wrist_layout.setContentsMargins(0, 0, 0, 0)
+        wrist_layout.setSpacing(6)
 
         wrist_title = QLabel("【手部相机 (Eye-in-Hand)】")
         wrist_title.setAlignment(Qt.AlignCenter)
         self.lbl_wrist = QLabel("无画面")
         self.lbl_wrist.setAlignment(Qt.AlignCenter)
-        self.lbl_wrist.setStyleSheet("background-color: black; color: white;")
+        self.lbl_wrist.setStyleSheet("background-color: #202020; color: white; border-radius: 4px;")
+        self.lbl_wrist.setMinimumHeight(220)
         self.lbl_wrist.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        wrist_layout.addWidget(wrist_title)
+        wrist_layout.addWidget(self.lbl_wrist)
 
-        cam_layout.addWidget(global_title)
-        cam_layout.addWidget(self.lbl_agent)
-        cam_layout.addWidget(wrist_title)
-        cam_layout.addWidget(self.lbl_wrist)
-        content_layout.addLayout(cam_layout, stretch=2)
+        cam_layout.addWidget(agent_panel, 1)
+        cam_layout.addWidget(wrist_panel, 1)
+        content_layout.addWidget(self.cam_panel, 3)
 
         self.text_state = QTextEdit()
         self.text_state.setReadOnly(True)
+        self.text_state.setMinimumWidth(280)
+        self.text_state.setMaximumWidth(420)
+        self.text_state.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         self.text_state.setStyleSheet("font-family: Consolas, monospace; font-size: 13px; background-color: #f5f5f5;")
-        content_layout.addWidget(self.text_state, stretch=1)
+        content_layout.addWidget(self.text_state, 1)
         main_layout.addLayout(content_layout)
 
     def open_file_dialog(self):
@@ -216,6 +259,9 @@ class HDF5ViewerDialog(QDialog):
             QMessageBox.critical(self, "HDF5 读取错误", str(exc))
 
     def rebuild_dataset_schema(self):
+        class RebuildCancelledError(Exception):
+            pass
+
         if self.hdf5_path and os.path.exists(self.hdf5_path):
             input_path = self.hdf5_path
         else:
@@ -267,21 +313,84 @@ class HDF5ViewerDialog(QDialog):
         if reply != QMessageBox.Yes:
             return
 
-        QApplication.setOverrideCursor(Qt.WaitCursor)
+        output_file = Path(output_path)
+        temp_output_path = output_file.with_name(f"{output_file.name}.tmp")
+        progress_dialog = None
+
         try:
+            with h5py.File(input_path, "r") as source_h5:
+                source_data = source_h5.get("data")
+                if not isinstance(source_data, h5py.Group):
+                    raise RuntimeError("输入 HDF5 中未找到 /data 组。")
+
+                demo_names = [
+                    name for name in sorted_demo_names(source_data) if isinstance(source_data.get(name), h5py.Group)
+                ]
+                if not demo_names:
+                    raise RuntimeError("输入 HDF5 中没有可转换的 demo_* 组。")
+
+            datasets_per_demo = 12
+            total_steps = len(demo_names) * datasets_per_demo + 1
+            progress_dialog = QProgressDialog("正在准备转换...", "取消", 0, total_steps, self)
+            progress_dialog.setWindowTitle("转换为训练格式")
+            progress_dialog.setWindowModality(Qt.WindowModal)
+            progress_dialog.setMinimumDuration(0)
+            progress_dialog.setAutoClose(False)
+            progress_dialog.setAutoReset(False)
+            progress_dialog.setValue(0)
+            progress_dialog.show()
+            QApplication.processEvents()
+
+            completed_steps = 0
+
+            def update_progress(dataset_path):
+                nonlocal completed_steps
+                completed_steps += 1
+                progress_dialog.setLabelText(f"正在转换训练格式...\n{dataset_path}")
+                progress_dialog.setValue(completed_steps)
+                QApplication.processEvents()
+                if progress_dialog.wasCanceled():
+                    raise RebuildCancelledError()
+
             results = rebuild_file(
                 input_path=input_path,
-                output_path=output_path,
+                output_path=str(temp_output_path),
                 include_states=True,
                 renumber=True,
                 compression=compression_settings["compression"],
                 compression_opts=compression_settings["compression_opts"],
+                progress_callback=update_progress,
             )
+            progress_dialog.setLabelText("正在写入输出文件...")
+            progress_dialog.setValue(total_steps)
+            QApplication.processEvents()
+            if progress_dialog.wasCanceled():
+                raise RebuildCancelledError()
+
+            os.replace(temp_output_path, output_file)
+        except RebuildCancelledError:
+            try:
+                if temp_output_path.exists():
+                    temp_output_path.unlink()
+            except Exception:
+                pass
+            if progress_dialog is not None:
+                progress_dialog.close()
+            QMessageBox.information(self, "已取消", "已取消转换，输出文件未被写入。")
+            return
         except Exception as exc:
+            try:
+                if temp_output_path.exists():
+                    temp_output_path.unlink()
+            except Exception:
+                pass
+            if progress_dialog is not None:
+                progress_dialog.close()
             QMessageBox.critical(self, "转换失败", f"重建数据集失败:\n{exc}")
             return
         finally:
-            QApplication.restoreOverrideCursor()
+            if progress_dialog is not None:
+                progress_dialog.close()
 
         total_frames = sum(num_samples for _, _, num_samples in results)
         reply = QMessageBox.question(
@@ -395,6 +504,12 @@ class HDF5ViewerDialog(QDialog):
         self._update_pending_state_label()
         self.load_demo()
 
+    def _update_demo_navigation_buttons(self):
+        current_index = self.demo_combo.currentIndex()
+        has_demos = bool(self.demo_names)
+        self.btn_prev_demo.setEnabled(has_demos and current_index > 0)
+        self.btn_next_demo.setEnabled(has_demos and 0 <= current_index < len(self.demo_names) - 1)
+
     def _update_pending_state_label(self):
         changes = []
         if self.pending_crop_ranges:
@@ -409,17 +524,36 @@ class HDF5ViewerDialog(QDialog):
             self.lbl_pending_state.setStyleSheet("color: #b26a00; font-weight: bold;")
 
         self.btn_delete_current.setEnabled(len(self.demo_names) > 1)
+        self._update_demo_navigation_buttons()
 
     def _copy_attrs(self, source, target):
         for key, value in source.attrs.items():
             target.attrs[key] = value
 
-    def _copy_group_sliced(self, source_group, target_group, start, end, total):
+    def _count_group_datasets(self, source_group):
+        count = 0
+        for item in source_group.values():
+            if isinstance(item, h5py.Group):
+                count += self._count_group_datasets(item)
+            else:
+                count += 1
+        return count
+
+    def _copy_group_sliced(self, source_group, target_group, start, end, total, progress_callback=None, path_prefix=""):
         self._copy_attrs(source_group, target_group)
         for name, item in source_group.items():
+            current_path = f"{path_prefix}/{name}" if path_prefix else name
             if isinstance(item, h5py.Group):
                 child = target_group.create_group(name)
-                self._copy_group_sliced(item, child, start, end, total)
+                self._copy_group_sliced(
+                    item,
+                    child,
+                    start,
+                    end,
+                    total,
+                    progress_callback=progress_callback,
+                    path_prefix=current_path,
+                )
                 continue
 
             kwargs = {
@@ -441,8 +575,13 @@ class HDF5ViewerDialog(QDialog):
 
             target_dataset = target_group.create_dataset(name, data=data, **kwargs)
             self._copy_attrs(item, target_dataset)
+            if progress_callback is not None:
+                progress_callback(current_path)
 
     def save_pending_changes(self):
+        class SaveCancelledError(Exception):
+            pass
+
         if not self.pending_crop_ranges and not self.pending_deleted_demos:
             QMessageBox.information(self, "提示", "当前没有待保存的裁剪或删除操作。")
             return
@@ -469,14 +608,11 @@ class HDF5ViewerDialog(QDialog):
 
         source_path = Path(self.hdf5_path)
         temp_path = source_path.with_suffix(source_path.suffix + ".tmp")
+        progress_dialog = None
 
         try:
-            with h5py.File(source_path, "r") as source_h5, h5py.File(temp_path, "w") as target_h5:
-                self._copy_attrs(source_h5, target_h5)
+            with h5py.File(source_path, "r") as source_h5:
                 source_data = source_h5["data"]
-                target_data = target_h5.create_group("data")
-                self._copy_attrs(source_data, target_data)
-
                 source_demo_names = sorted(source_data.keys(), key=self._demo_sort_key)
                 kept_demo_names = [name for name in self.demo_names if name in source_data]
                 if not kept_demo_names:
@@ -486,26 +622,95 @@ class HDF5ViewerDialog(QDialog):
                 if unknown_demo_names:
                     raise ValueError(f"待保留 demo 不存在于源文件: {unknown_demo_names}")
 
-                for index, source_demo_name in enumerate(kept_demo_names):
-                    source_demo = source_data[source_demo_name]
-                    new_demo_name = f"demo_{index}"
-                    total = self._infer_num_samples(source_demo)
-                    start, end = self._effective_crop_range(source_demo_name, total)
+                total_steps = 1 + sum(self._count_group_datasets(source_data[name]) for name in kept_demo_names)
+                progress_dialog = QProgressDialog("正在准备保存修改...", "取消", 0, total_steps, self)
+                progress_dialog.setWindowTitle("保存修改")
+                progress_dialog.setWindowModality(Qt.WindowModal)
+                progress_dialog.setMinimumDuration(0)
+                progress_dialog.setAutoClose(False)
+                progress_dialog.setAutoReset(False)
+                progress_dialog.setValue(0)
+                progress_dialog.show()
+                QApplication.processEvents()
 
-                    target_demo = target_data.create_group(new_demo_name)
-                    self._copy_group_sliced(source_demo, target_demo, start, end, total)
-                    target_demo.attrs["num_samples"] = int(max(0, end - start))
+                completed_steps = 0
+
+                with h5py.File(temp_path, "w") as target_h5:
+                    self._copy_attrs(source_h5, target_h5)
+                    target_data = target_h5.create_group("data")
+                    self._copy_attrs(source_data, target_data)
+
+                    for index, source_demo_name in enumerate(kept_demo_names):
+                        if progress_dialog.wasCanceled():
+                            raise SaveCancelledError()
+
+                        source_demo = source_data[source_demo_name]
+                        new_demo_name = f"demo_{index}"
+                        total = self._infer_num_samples(source_demo)
+                        start, end = self._effective_crop_range(source_demo_name, total)
+
+                        progress_dialog.setLabelText(
+                            f"正在保存 {source_demo_name} ({index + 1}/{len(kept_demo_names)})..."
+                        )
+                        QApplication.processEvents()
+                        if progress_dialog.wasCanceled():
+                            raise SaveCancelledError()
+
+                        target_demo = target_data.create_group(new_demo_name)
+
+                        def update_progress(dataset_path, demo_name=source_demo_name, demo_index=index):
+                            nonlocal completed_steps
+                            completed_steps += 1
+                            progress_dialog.setLabelText(
+                                f"正在保存 {demo_name} ({demo_index + 1}/{len(kept_demo_names)})...\n{dataset_path}"
+                            )
+                            progress_dialog.setValue(completed_steps)
+                            QApplication.processEvents()
+                            if progress_dialog.wasCanceled():
+                                raise SaveCancelledError()
+
+                        self._copy_group_sliced(
+                            source_demo,
+                            target_demo,
+                            start,
+                            end,
+                            total,
+                            progress_callback=update_progress,
+                        )
+                        target_demo.attrs["num_samples"] = int(max(0, end - start))
+
+                progress_dialog.setLabelText("正在替换原始 HDF5 文件...")
+                progress_dialog.setValue(total_steps)
+                QApplication.processEvents()
+                if progress_dialog.wasCanceled():
+                    raise SaveCancelledError()
 
             os.replace(temp_path, source_path)
+        except SaveCancelledError:
+            try:
+                if temp_path.exists():
+                    temp_path.unlink()
+            except Exception:
+                pass
+            if progress_dialog is not None:
+                progress_dialog.close()
+            QMessageBox.information(self, "已取消", "已取消保存修改，原始 HDF5 文件未被改动。")
+            self.open_hdf5_file(str(source_path))
+            return
         except Exception as exc:
             try:
                 if temp_path.exists():
                     temp_path.unlink()
             except Exception:
                 pass
+            if progress_dialog is not None:
+                progress_dialog.close()
             QMessageBox.critical(self, "保存失败", f"保存对 HDF5 的修改失败:\n{exc}")
             self.open_hdf5_file(str(source_path))
             return
+        finally:
+            if progress_dialog is not None:
+                progress_dialog.close()
 
         QMessageBox.information(self, "保存完成", "裁剪和删除修改已经写回 HDF5 文件，剩余 demo 已按顺序连续重命名。")
         self.open_hdf5_file(str(source_path))
@@ -561,6 +766,80 @@ class HDF5ViewerDialog(QDialog):
             self.pending_crop_ranges[demo_name] = (start, end)
         self._refresh_demo_combo(demo_name)
 
+    def _compute_zero_action_trim_range(self, demo_group, start, end):
+        if "actions" not in demo_group:
+            return None
+
+        actions = np.asarray(demo_group["actions"], dtype=np.float32)
+        if actions.ndim != 2 or actions.shape[0] <= 0:
+            return None
+
+        start = max(0, int(start))
+        end = min(int(end), int(actions.shape[0]))
+        if start >= end:
+            return None
+
+        window = actions[start:end]
+        zero_mask = np.all(np.isclose(window, 0.0, atol=self.ZERO_ACTION_ATOL), axis=1)
+        nonzero_indices = np.flatnonzero(~zero_mask)
+        if nonzero_indices.size == 0:
+            return None
+
+        trimmed_start = start + int(nonzero_indices[0])
+        trimmed_end = start + int(nonzero_indices[-1]) + 1
+        trimmed_start = max(start, trimmed_start - self.ZERO_ACTION_CONTEXT_FRAMES)
+        trimmed_end = min(end, trimmed_end + self.ZERO_ACTION_CONTEXT_FRAMES)
+        return trimmed_start, trimmed_end
+
+    def auto_trim_zero_action_ranges(self):
+        if self.file_handle is None or not self.demo_names:
+            return
+
+        updated = 0
+        unchanged = 0
+        skipped = []
+        selected_demo = self.demo_combo.currentData()
+
+        for demo_name in self.demo_names:
+            if demo_name not in self.file_handle["data"]:
+                continue
+
+            demo_group = self.file_handle["data"][demo_name]
+            total = self._infer_num_samples(demo_group)
+            start, end = self._effective_crop_range(demo_name, total)
+            trim_range = self._compute_zero_action_trim_range(demo_group, start, end)
+            if trim_range is None:
+                skipped.append(str(demo_name))
+                continue
+
+            trimmed_start, trimmed_end = trim_range
+            new_range = None if (trimmed_start == 0 and trimmed_end == total) else (trimmed_start, trimmed_end)
+            previous_range = self.pending_crop_ranges.get(demo_name)
+            if new_range is None:
+                if demo_name in self.pending_crop_ranges:
+                    self.pending_crop_ranges.pop(demo_name, None)
+                    updated += 1
+                else:
+                    unchanged += 1
+                continue
+
+            if previous_range == new_range:
+                unchanged += 1
+                continue
+
+            self.pending_crop_ranges[demo_name] = new_range
+            updated += 1
+
+        self._refresh_demo_combo(selected_demo)
+
+        message = f"自动裁切完成。\n\n已更新: {updated} 个 demo\n无变化: {unchanged} 个 demo"
+        if skipped:
+            preview = "、".join(skipped[:5])
+            if len(skipped) > 5:
+                preview += " ..."
+            message += f"\n跳过: {len(skipped)} 个 demo（区间内 actions 全为 0 或缺少 actions）\n{preview}"
+        QMessageBox.information(self, "自动裁切完成", message)
+
     def clear_crop_range(self):
         demo_name = self.demo_combo.currentData()
         if not demo_name:
@@ -568,10 +847,58 @@ class HDF5ViewerDialog(QDialog):
         self.pending_crop_ranges.pop(demo_name, None)
         self._refresh_demo_combo(demo_name)
 
+    def _switch_demo_by_offset(self, offset):
+        if not self.demo_names:
+            return
+
+        current_index = self.demo_combo.currentIndex()
+        if current_index < 0:
+            current_index = 0
+
+        next_index = max(0, min(current_index + int(offset), len(self.demo_names) - 1))
+        if next_index == current_index:
+            return
+        self.demo_combo.setCurrentIndex(next_index)
+
+    def goto_prev_demo(self):
+        self.pause_playback()
+        self._switch_demo_by_offset(-1)
+
+    def goto_next_demo(self):
+        self.pause_playback()
+        self._switch_demo_by_offset(1)
+
+    def _set_camera_pixmap(self, label, pixmap):
+        if pixmap.isNull():
+            label.setPixmap(QPixmap())
+            return
+
+        target_size = label.size()
+        if target_size.width() <= 1 or target_size.height() <= 1:
+            label.setPixmap(pixmap)
+            return
+
+        label.setPixmap(pixmap.scaled(target_size, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+
+    def _refresh_camera_pixmaps(self):
+        if not self._agent_source_pixmap.isNull():
+            self._set_camera_pixmap(self.lbl_agent, self._agent_source_pixmap)
+        if not self._wrist_source_pixmap.isNull():
+            self._set_camera_pixmap(self.lbl_wrist, self._wrist_source_pixmap)
+
+    def _clear_camera_views(self):
+        self._agent_source_pixmap = QPixmap()
+        self._wrist_source_pixmap = QPixmap()
+        self.lbl_agent.setPixmap(QPixmap())
+        self.lbl_agent.setText("无画面")
+        self.lbl_wrist.setPixmap(QPixmap())
+        self.lbl_wrist.setText("无画面")
+
     def load_demo(self):
         self.pause_playback()
         demo_name = self.demo_combo.currentData()
         if not demo_name or self.file_handle is None:
+            self._update_demo_navigation_buttons()
             return
 
         self.current_demo_name = str(demo_name)
@@ -608,11 +935,10 @@ class HDF5ViewerDialog(QDialog):
             self.slider.setMaximum(0)
             self.slider.setValue(0)
             self.slider.blockSignals(False)
-            self.lbl_agent.setPixmap(QPixmap())
-            self.lbl_agent.setText("无画面")
-            self.lbl_wrist.setPixmap(QPixmap())
-            self.lbl_wrist.setText("无画面")
+            self._clear_camera_views()
             self.text_state.setText("当前 demo 为空，无法预览。")
+
+        self._update_demo_navigation_buttons()
 
     def toggle_play(self):
         if self.current_demo_group is None:
@@ -738,14 +1064,20 @@ class HDF5ViewerDialog(QDialog):
         try:
             agent_rgb = self.current_demo_group["obs"]["agentview_rgb"][source_idx]
             wrist_rgb = self.current_demo_group["obs"]["eye_in_hand_rgb"][source_idx]
-            height, width, channels = agent_rgb.shape
-            bytes_per_line = channels * width
+            agent_height, agent_width, agent_channels = agent_rgb.shape
+            wrist_height, wrist_width, wrist_channels = wrist_rgb.shape
 
-            qimg_agent = QImage(agent_rgb.data, width, height, bytes_per_line, QImage.Format_RGB888)
-            self.lbl_agent.setPixmap(QPixmap.fromImage(qimg_agent).scaled(self.lbl_agent.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            agent_bytes_per_line = agent_channels * agent_width
+            qimg_agent = QImage(agent_rgb.data, agent_width, agent_height, agent_bytes_per_line, QImage.Format_RGB888)
+            self._agent_source_pixmap = QPixmap.fromImage(qimg_agent)
+            self.lbl_agent.setText("")
+            self._set_camera_pixmap(self.lbl_agent, self._agent_source_pixmap)
 
-            qimg_wrist = QImage(wrist_rgb.data, width, height, bytes_per_line, QImage.Format_RGB888)
-            self.lbl_wrist.setPixmap(QPixmap.fromImage(qimg_wrist).scaled(self.lbl_wrist.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            wrist_bytes_per_line = wrist_channels * wrist_width
+            qimg_wrist = QImage(wrist_rgb.data, wrist_width, wrist_height, wrist_bytes_per_line, QImage.Format_RGB888)
+            self._wrist_source_pixmap = QPixmap.fromImage(qimg_wrist)
+            self.lbl_wrist.setText("")
+            self._set_camera_pixmap(self.lbl_wrist, self._wrist_source_pixmap)
 
             payload = self._get_frame_payload(source_idx)
             joints = payload["joints"]
@@ -794,6 +1126,10 @@ class HDF5ViewerDialog(QDialog):
             self.text_state.setText(text)
         except Exception as exc:
             self.text_state.setText(f"读取帧数据失败: {exc}")
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._refresh_camera_pixmaps()
 
     def closeEvent(self, event):
         self.pause_playback()

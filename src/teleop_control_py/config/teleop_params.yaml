@@ -26,11 +26,14 @@ teleop_control_node:
     trajectory_controller: "scaled_joint_trajectory_controller"
     startup_retry_period_sec: 1.0
 
-    # 速度 / 加速度限幅；松手后对应轴直接回零。
+    # 速度 / 加速度限幅。
     max_linear_vel: 1.5
     max_angular_vel: 3.0
     max_linear_accel: 4.0
     max_angular_accel: 8.0
+    # 松手后回零时使用的加速度倍率。
+    # 越小回零越慢、更柔和；越大回零越快。1.0 表示和正常加速同样快。
+    zero_return_accel_scale: 1.0
 
     # ==========================================================
     # 3) Joy 手柄输入
@@ -47,20 +50,20 @@ teleop_control_node:
     deadman_axis: 4
     deadman_axis_threshold: 0.5
 
-    # 轴为 -1 时，改由按钮控制该自由度。
+    # Z 方向仅使用左右扳机控制：RT 上升，LT 下降。
     linear_x_axis: 0
     linear_y_axis: 1
     linear_z_axis: -1
+    linear_z_up_axis: 5
+    linear_z_down_axis: 4
     linear_axis_sign: [-1.0, -1.0, 1.0]
-    linear_z_up_button: 1
-    linear_z_down_button: 0
 
     angular_x_axis: 3
     angular_y_axis: 2
     angular_z_axis: -1
     angular_axis_sign: [-1.0, 1.0, 1.0]
-    angular_z_positive_button: 3
-    angular_z_negative_button: 2
+    angular_z_positive_button: 1
+    angular_z_negative_button: 0
 
     # gripper_axis >= 0 时优先使用轴控制。
     gripper_close_button: 5

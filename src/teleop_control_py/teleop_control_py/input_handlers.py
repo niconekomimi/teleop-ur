@@ -154,8 +154,8 @@ class JoyInputHandler(InputHandlerBase):
             int(node.get_parameter("linear_y_axis").value),
             int(node.get_parameter("linear_z_axis").value),
         ]
-        self._linear_z_up_button = int(node.get_parameter("linear_z_up_button").value)
-        self._linear_z_down_button = int(node.get_parameter("linear_z_down_button").value)
+        self._linear_z_up_axis = int(node.get_parameter("linear_z_up_axis").value)
+        self._linear_z_down_axis = int(node.get_parameter("linear_z_down_axis").value)
         self._angular_axes = [
             int(node.get_parameter("angular_x_axis").value),
             int(node.get_parameter("angular_y_axis").value),
@@ -198,6 +198,11 @@ class JoyInputHandler(InputHandlerBase):
             return -1.0
         return 0.0
 
+    def _trigger_axis(self, axes: Sequence[float], positive_axis: int, negative_axis: int) -> float:
+        positive = self._axis_value(axes, positive_axis)
+        negative = self._axis_value(axes, negative_axis)
+        return float(_clamp(positive - negative, -1.0, 1.0))
+
     def _deadman_active(self, axes: Sequence[float], buttons: Sequence[int]) -> bool:
         if not self._deadman_enabled:
             return True
@@ -215,7 +220,7 @@ class JoyInputHandler(InputHandlerBase):
         if self._deadman_active(axes, buttons):
             linear_z = self._axis_value(axes, self._linear_axes[2])
             if self._linear_axes[2] < 0:
-                linear_z = self._button_axis(buttons, self._linear_z_up_button, self._linear_z_down_button)
+                linear_z = self._trigger_axis(axes, self._linear_z_up_axis, self._linear_z_down_axis)
 
             angular_z = self._axis_value(axes, self._angular_axes[2])
             if self._angular_axes[2] < 0:

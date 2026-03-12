@@ -14,6 +14,7 @@ from launch.actions import (
 	LogInfo,
 	OpaqueFunction,
 )
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
@@ -121,6 +122,11 @@ def _resolve_gripper_type(context) -> str:
 	return "robotiq"
 
 
+def _teleop_node_enabled(context) -> bool:
+	value = LaunchConfiguration("launch_teleop_node").perform(context).strip().lower()
+	return value in ("1", "true", "yes", "on")
+
+
 def _maybe_include_end_effector_driver(context, *args, **kwargs):
 	ee = _resolve_gripper_type(context)
 	actions = [LogInfo(msg=f"[control_system] resolved gripper_type: {ee}")]
@@ -157,8 +163,12 @@ def _maybe_include_end_effector_driver(context, *args, **kwargs):
 
 def _maybe_include_joy_driver(context, *args, **kwargs):
 	input_type = _resolve_input_type(context)
+	teleop_enabled = _teleop_node_enabled(context)
 
-	actions = [LogInfo(msg=f"[control_system] resolved input_type: {input_type}")]
+	actions = [LogInfo(msg=f"[control_system] resolved input_type: {input_type}, launch_teleop_node={teleop_enabled}")]
+	if not teleop_enabled:
+		actions.append(LogInfo(msg="[control_system] Skip joy driver because teleop node is disabled"))
+		return actions
 	if input_type != "joy":
 		return actions
 
@@ -414,6 +424,11 @@ def generate_launch_description() -> LaunchDescription:
 		default_value="false",
 		description="Enable data_collector_node bringup as part of the full control system.",
 	)
+	launch_teleop_node_arg = DeclareLaunchArgument(
+		"launch_teleop_node",
+		default_value="true",
+		description="Launch teleop_control_node input/output loop.",
+	)
 	data_collector_params_file_arg = DeclareLaunchArgument(
 		"data_collector_params_file",
 		default_value=os.path.join(teleop_share, "config", "data_collector_params.yaml"),
@@ -443,6 +458,7 @@ def generate_launch_description() -> LaunchDescription:
 			"control_mode": LaunchConfiguration("control_mode"),
 			"end_effector": LaunchConfiguration("end_effector"),
 		}.items(),
+		condition=IfCondition(LaunchConfiguration("launch_teleop_node")),
 	)
 
 	return LaunchDescription(
@@ -471,6 +487,7 @@ def generate_launch_description() -> LaunchDescription:
 			enable_moveit_arg,
 			enable_camera_arg,
 			enable_data_collector_arg,
+			launch_teleop_node_arg,
 			data_collector_params_file_arg,
 			OpaqueFunction(function=_maybe_include_joy_driver),
 			OpaqueFunction(function=_maybe_include_moveit_servo),

@@ -15,7 +15,7 @@ import numpy as np
 import rclpy
 import h5py
 from builtin_interfaces.msg import Duration as DurationMsg
-from controller_manager_msgs.srv import SwitchController
+from controller_manager_msgs.srv import ListControllers, SwitchController
 from cv_bridge import CvBridge
 from geometry_msgs.msg import PoseStamped
 from geometry_msgs.msg import TwistStamped
@@ -23,13 +23,15 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from rclpy.time import Time
 from sensor_msgs.msg import Image, JointState
-from std_msgs.msg import Float32, Float32MultiArray
+from std_msgs.msg import Bool, Float32, Float32MultiArray
 from std_srvs.srv import Trigger
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 from .camera_client import OAKClient, RealSenseClient
+from .home_zone_utils import compose_pose_with_rpy_offset, drive_pose_target, pose_to_string, sample_home_zone_pose_offsets
 from .hdf5_writer import Command, HDF5WriterThread, Sample
 from .transform_utils import _clamp, center_crop_square_and_resize_rgb, compose_eef_action
+from .ur_kinematics import try_forward_kinematics
 
 
 class DataCollectorNode(Node):
@@ -77,10 +79,23 @@ class DataCollectorNode(Node):
         self.declare_parameter("preview_global_topic", "/data_collector/preview/global/image_raw")
         self.declare_parameter("preview_wrist_topic", "/data_collector/preview/wrist/image_raw")
         self.declare_parameter("enable_keyboard", False)
+        self.declare_parameter("ur_type", "ur5")
         self.declare_parameter(
             "home_joint_positions",
             [1.524178, -2.100060, 1.864580, -1.345048, -1.575888, 1.528195],
         )
+        self.declare_parameter("home_zone_translation_min_m", [0.04, 0.04, 0.04])
+        self.declare_parameter("home_zone_translation_max_m", [0.08, 0.08, 0.08])
+        self.declare_parameter("home_zone_rotation_min_deg", [5.0, 5.0, 5.0])
+        self.declare_parameter("home_zone_rotation_max_deg", [10.0, 10.0, 10.0])
+        self.declare_parameter("home_zone_timeout_sec", 30.0)
+        self.declare_parameter("home_zone_rate_hz", 60.0)
+        self.declare_parameter("home_zone_max_linear_vel", 0.50)
+        self.declare_parameter("home_zone_max_angular_vel", 1.5)
+        self.declare_parameter("home_zone_linear_gain", 2.4)
+        self.declare_parameter("home_zone_angular_gain", 2.4)
+        self.declare_parameter("home_zone_position_tolerance_m", 0.005)
+        self.declare_parameter("home_zone_rotation_tolerance_deg", 6.0)
         self.declare_parameter("home_duration_sec", 3.0)
         self.declare_parameter(
             "home_joint_trajectory_topic",
@@ -91,6 +106,7 @@ class DataCollectorNode(Node):
 
         self._output_path = str(self.get_parameter("output_path").value)
         self._record_fps = max(0.1, float(self.get_parameter("record_fps").value))
+        self._ur_type = str(self.get_parameter("ur_type").value).strip().lower() or "ur5"
         self._joint_names = list(self.get_parameter("joint_names").value)
         self._pose_max_age = float(self.get_parameter("pose_max_age_sec").value)
         self._command_max_age = float(self.get_parameter("command_max_age_sec").value)
@@ -142,6 +158,9 @@ class DataCollectorNode(Node):
 
         self._stats: Dict[str, int] = {}
         self._homing_in_progress = False
+        self._home_zone_in_progress = False
+        self._home_zone_token = 0
+        self._home_zone_lock = threading.Lock()
         self._keyboard_thread: Optional[threading.Thread] = None
         self._keyboard_stop_evt = threading.Event()
         self._bridge = CvBridge()
@@ -184,8 +203,12 @@ class DataCollectorNode(Node):
 
         home_topic = str(self.get_parameter("home_joint_trajectory_topic").value)
         self._home_pub = self.create_publisher(JointTrajectory, home_topic, 10)
+        self._home_zone_twist_pub = self.create_publisher(TwistStamped, twist_topic, 10)
+        self._list_ctrl_client = self.create_client(ListControllers, "/controller_manager/list_controllers")
         self._switch_ctrl_client = self.create_client(SwitchController, "/controller_manager/switch_controller")
+        self._start_servo_client = self.create_client(Trigger, "/servo_node/start_servo")
         self._record_stats_pub = self.create_publisher(Float32MultiArray, "~/record_stats", 10)
+        self._home_zone_active_pub = self.create_publisher(Bool, "~/home_zone_active", 10)
 
         if self._preview_enabled:
             self._preview_global_pub = self.create_publisher(Image, self._preview_global_topic, qos_profile_sensor_data)
@@ -196,6 +219,9 @@ class DataCollectorNode(Node):
         self._srv_start = self.create_service(Trigger, "~/start", self._srv_start_cb)
         self._srv_stop = self.create_service(Trigger, "~/stop", self._srv_stop_cb)
         self._srv_go_home = self.create_service(Trigger, "~/go_home", self._srv_go_home_cb)
+        self._srv_go_home_zone = self.create_service(Trigger, "~/go_home_zone", self._srv_go_home_zone_cb)
+        self._srv_cancel_home_zone = self.create_service(Trigger, "~/cancel_home_zone", self._srv_cancel_home_zone_cb)
+        self._publish_home_zone_active(False)
 
         if bool(self.get_parameter("enable_keyboard").value):
             self._keyboard_thread = threading.Thread(target=self._keyboard_loop, daemon=True)
@@ -206,7 +232,7 @@ class DataCollectorNode(Node):
             self._stats_timer = self.create_timer(period, self._log_stats)
 
         self.get_logger().info(
-            "DataCollectorNode ready. Services: ~/start, ~/stop, ~/go_home. "
+            "DataCollectorNode ready. Services: ~/start, ~/stop, ~/go_home, ~/go_home_zone, ~/cancel_home_zone. "
             f"Global camera={self._global_camera_source}, Wrist camera={self._wrist_camera_source}, "
             f"Gripper={gripper_topic}, Output={self._output_path}, FPS={self._record_fps:.2f}"
         )
@@ -708,7 +734,7 @@ class DataCollectorNode(Node):
         return res
 
     def _srv_go_home_cb(self, _req: Trigger.Request, res: Trigger.Response) -> Trigger.Response:
-        if self._homing_in_progress:
+        if self._homing_in_progress or self._home_zone_in_progress:
             res.success = False
             res.message = "Homing sequence is already in progress!"
             return res
@@ -726,6 +752,393 @@ class DataCollectorNode(Node):
         res.message = "Homing sequence started (controllers will switch automatically)"
         self.get_logger().info(res.message)
         return res
+
+    def _next_home_zone_token(self) -> int:
+        with self._home_zone_lock:
+            self._home_zone_token += 1
+            return self._home_zone_token
+
+    def _current_home_zone_token(self) -> int:
+        with self._home_zone_lock:
+            return self._home_zone_token
+
+    def _cancel_home_zone(self, reason: str) -> None:
+        token = self._next_home_zone_token()
+        self._publish_home_zone_active(False)
+        for _ in range(5):
+            self._publish_home_zone_zero_twist()
+            time.sleep(0.01)
+        threading.Thread(target=self._restore_home_zone_teleop_control, daemon=True).start()
+        self.get_logger().info(f"Home Zone cancel requested ({reason}), token={token}")
+
+    def _home_zone_aborted(self, token: int) -> bool:
+        return int(token) != int(self._current_home_zone_token())
+
+    def _srv_go_home_zone_cb(self, _req: Trigger.Request, res: Trigger.Response) -> Trigger.Response:
+        if self._homing_in_progress or self._home_zone_in_progress:
+            res.success = False
+            res.message = "Home Zone sequence is already in progress!"
+            return res
+
+        home_positions = list(self.get_parameter("home_joint_positions").value)
+        if len(home_positions) < 6:
+            res.success = False
+            res.message = "home_joint_positions must have 6 elements"
+            return res
+
+        ranges = [
+            list(self.get_parameter("home_zone_translation_min_m").value),
+            list(self.get_parameter("home_zone_translation_max_m").value),
+            list(self.get_parameter("home_zone_rotation_min_deg").value),
+            list(self.get_parameter("home_zone_rotation_max_deg").value),
+        ]
+        if min(len(values) for values in ranges) < 3:
+            res.success = False
+            res.message = "home_zone translation/rotation ranges must have 3 elements"
+            return res
+
+        token = self._next_home_zone_token()
+        self._home_zone_in_progress = True
+        self._publish_home_zone_active(True)
+        threading.Thread(
+            target=self._execute_go_home_zone_sequence,
+            args=(token, [float(value) for value in home_positions[:6]]),
+            daemon=True,
+        ).start()
+        res.success = True
+        res.message = "Home Zone sequence started"
+        self.get_logger().info(res.message)
+        return res
+
+    def _srv_cancel_home_zone_cb(self, _req: Trigger.Request, res: Trigger.Response) -> Trigger.Response:
+        if not self._home_zone_in_progress:
+            res.success = True
+            res.message = "No Home Zone motion is running"
+            return res
+        self._cancel_home_zone("service request")
+        res.success = True
+        res.message = "Home Zone cancellation requested"
+        return res
+
+    def _list_controller_states(self) -> Optional[dict[str, str]]:
+        if not self._list_ctrl_client.wait_for_service(timeout_sec=0.5):
+            return None
+        try:
+            future = self._list_ctrl_client.call_async(ListControllers.Request())
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline and not future.done():
+                time.sleep(0.02)
+            if not future.done():
+                return None
+            response = future.result()
+            return {controller.name: controller.state for controller in response.controller}
+        except Exception:
+            return None
+
+    def _publish_home_zone_active(self, active: bool) -> None:
+        try:
+            msg = Bool()
+            msg.data = bool(active)
+            self._home_zone_active_pub.publish(msg)
+        except Exception:
+            pass
+
+    def _restore_home_zone_teleop_control(self) -> None:
+        teleop_ctrl = str(self.get_parameter("teleop_controller").value)
+        traj_ctrl = str(self.get_parameter("trajectory_controller").value)
+        if not self._switch_ctrl_client.wait_for_service(timeout_sec=0.5):
+            return
+        try:
+            request = SwitchController.Request()
+            request.activate_controllers = [teleop_ctrl]
+            request.deactivate_controllers = [traj_ctrl]
+            request.strictness = SwitchController.Request.BEST_EFFORT
+            future = self._switch_ctrl_client.call_async(request)
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline and not future.done():
+                time.sleep(0.02)
+            if future.done():
+                response = future.result()
+                if response is not None and bool(response.ok):
+                    self.get_logger().info("Home Zone cancel restored teleop controller.")
+            self._wait_for_home_zone_teleop_ready(timeout_sec=1.0)
+        except Exception:
+            pass
+
+    def _wait_for_home_zone_teleop_ready(self, timeout_sec: float = 2.0) -> bool:
+        teleop_ctrl = str(self.get_parameter("teleop_controller").value)
+        traj_ctrl = str(self.get_parameter("trajectory_controller").value)
+        deadline = time.monotonic() + max(0.2, float(timeout_sec))
+        while time.monotonic() < deadline:
+            states = self._list_controller_states()
+            if states is None:
+                time.sleep(0.05)
+                continue
+            if states.get(teleop_ctrl) == "active" and states.get(traj_ctrl) != "active":
+                return True
+            time.sleep(0.05)
+        return False
+
+    def _wait_for_home_zone_trajectory_ready(self, timeout_sec: float = 2.0) -> bool:
+        teleop_ctrl = str(self.get_parameter("teleop_controller").value)
+        traj_ctrl = str(self.get_parameter("trajectory_controller").value)
+        deadline = time.monotonic() + max(0.2, float(timeout_sec))
+        while time.monotonic() < deadline:
+            states = self._list_controller_states()
+            if states is None:
+                time.sleep(0.05)
+                continue
+            if states.get(traj_ctrl) == "active" and states.get(teleop_ctrl) != "active":
+                return True
+            time.sleep(0.05)
+        return False
+
+    def _switch_home_zone_controllers(
+        self,
+        activate_controllers: list[str],
+        deactivate_controllers: list[str],
+        *,
+        timeout_sec: float = 2.0,
+    ) -> bool:
+        states = self._list_controller_states()
+        if states is not None:
+            activate_needed = [name for name in activate_controllers if states.get(name) != "active"]
+            deactivate_needed = [name for name in deactivate_controllers if states.get(name) == "active"]
+            if not activate_needed and not deactivate_needed:
+                return True
+        else:
+            activate_needed = list(activate_controllers)
+            deactivate_needed = list(deactivate_controllers)
+
+        if not self._switch_ctrl_client.wait_for_service(timeout_sec=0.5):
+            return False
+        try:
+            request = SwitchController.Request()
+            request.activate_controllers = activate_needed
+            request.deactivate_controllers = deactivate_needed
+            request.strictness = SwitchController.Request.BEST_EFFORT
+            future = self._switch_ctrl_client.call_async(request)
+            deadline = time.monotonic() + max(0.5, float(timeout_sec))
+            while time.monotonic() < deadline and not future.done():
+                time.sleep(0.02)
+            if not future.done():
+                return False
+            response = future.result()
+            if response is not None and not bool(response.ok):
+                return False
+        except Exception:
+            return False
+
+        if activate_controllers == [str(self.get_parameter("teleop_controller").value)]:
+            return self._wait_for_home_zone_teleop_ready(timeout_sec=timeout_sec)
+        if activate_controllers == [str(self.get_parameter("trajectory_controller").value)]:
+            return self._wait_for_home_zone_trajectory_ready(timeout_sec=timeout_sec)
+        return True
+
+    def _execute_go_home_for_home_zone_sequence(self, token: int, home_positions: list[float]) -> None:
+        home_positions = [float(value) for value in home_positions[:6]]
+        duration = float(self.get_parameter("home_duration_sec").value)
+        if duration <= 0.0:
+            duration = 3.0
+
+        teleop_ctrl = str(self.get_parameter("teleop_controller").value)
+        traj_ctrl = str(self.get_parameter("trajectory_controller").value)
+        if not self._switch_home_zone_controllers([traj_ctrl], [teleop_ctrl], timeout_sec=2.0):
+            raise RuntimeError(f"Home Zone 无法切换到 {traj_ctrl}")
+
+        trajectory = JointTrajectory()
+        trajectory.joint_names = [str(name) for name in self._joint_names[:6]]
+
+        point = JointTrajectoryPoint()
+        point.positions = home_positions
+        seconds = int(duration)
+        nanoseconds = int((duration - seconds) * 1e9)
+        point.time_from_start = DurationMsg(sec=seconds, nanosec=nanoseconds)
+        trajectory.points = [point]
+
+        self._home_pub.publish(trajectory)
+        self.get_logger().info(f"Published Home-for-Home-Zone trajectory, waiting {duration:.2f}s...")
+
+        deadline = time.monotonic() + duration + 0.5
+        while time.monotonic() < deadline:
+            if self._home_zone_aborted(token):
+                return
+            time.sleep(0.05)
+
+        if self._home_zone_aborted(token):
+            return
+        if not self._switch_home_zone_controllers([teleop_ctrl], [traj_ctrl], timeout_sec=2.0):
+            raise RuntimeError(f"Home Zone 无法恢复 {teleop_ctrl}")
+        self.get_logger().info("Home-for-Home-Zone sequence complete. Teleop restored.")
+
+    def _ensure_home_zone_servo_started(self) -> None:
+        if not self._start_servo_client.wait_for_service(timeout_sec=0.5):
+            return
+        try:
+            future = self._start_servo_client.call_async(Trigger.Request())
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline and not future.done():
+                time.sleep(0.02)
+            if future.done():
+                response = future.result()
+                if response is not None:
+                    self.get_logger().info(
+                        f"Home Zone Servo start returned success={bool(response.success)} message={response.message}"
+                    )
+        except Exception:
+            pass
+
+    def _get_fk_pose_snapshot(self) -> Optional[tuple[np.ndarray, np.ndarray]]:
+        with self._cache_lock:
+            joints = None if self._latest_joint_pos is None else self._latest_joint_pos.copy()
+        if joints is None or len(joints) < 6:
+            return None
+        return try_forward_kinematics(self._ur_type, joints[:6])
+
+    def _get_pose_topic_snapshot(self) -> Optional[tuple[np.ndarray, np.ndarray]]:
+        with self._cache_lock:
+            pos = None if self._latest_pose_pos is None else self._latest_pose_pos.copy()
+            quat = None if self._latest_pose_quat is None else self._latest_pose_quat.copy()
+        if pos is None or quat is None or len(pos) < 3 or len(quat) < 4:
+            return None
+        return pos[:3].astype(np.float64), quat[:4].astype(np.float64)
+
+    def _get_fresh_pose_topic_snapshot(self, max_age_sec: Optional[float] = None) -> Optional[tuple[np.ndarray, np.ndarray]]:
+        with self._cache_lock:
+            pos = None if self._latest_pose_pos is None else self._latest_pose_pos.copy()
+            quat = None if self._latest_pose_quat is None else self._latest_pose_quat.copy()
+            pose_time = self._latest_pose_time
+            pose_receive_time = self._latest_pose_receive_time
+        if pos is None or quat is None or pose_time is None or len(pos) < 3 or len(quat) < 4:
+            return None
+        max_age = float(self._pose_max_age if max_age_sec is None else max_age_sec)
+        if max_age > 0.0:
+            now = self.get_clock().now()
+            if pose_receive_time is not None:
+                receive_age = abs((now - pose_receive_time).nanoseconds) * 1e-9
+                if receive_age <= max_age:
+                    return pos[:3].astype(np.float64), quat[:4].astype(np.float64)
+            pose_ref = now if self._pose_stamp_zero_is_ref and pose_time.nanoseconds == 0 else pose_time
+            pose_age = abs((now - pose_ref).nanoseconds) * 1e-9
+            if pose_age > max_age:
+                return None
+        return pos[:3].astype(np.float64), quat[:4].astype(np.float64)
+
+    def _get_home_zone_pose_snapshot(self) -> Optional[tuple[np.ndarray, np.ndarray]]:
+        pose = self._get_fresh_pose_topic_snapshot(max_age_sec=max(0.3, float(self._pose_max_age)))
+        if pose is not None:
+            return pose
+        pose = self._get_fk_pose_snapshot()
+        if pose is not None:
+            return pose
+        return self._get_pose_topic_snapshot()
+
+    def _wait_for_home_zone_pose(self, timeout_sec: float = 2.0) -> Optional[tuple[np.ndarray, np.ndarray]]:
+        deadline = time.monotonic() + max(0.1, float(timeout_sec))
+        while time.monotonic() < deadline:
+            pose = self._get_home_zone_pose_snapshot()
+            if pose is not None:
+                return pose
+            time.sleep(0.02)
+        return None
+
+    def _publish_home_zone_twist(self, linear_xyz, angular_xyz) -> None:
+        msg = TwistStamped()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = "base"
+        msg.twist.linear.x = float(linear_xyz[0])
+        msg.twist.linear.y = float(linear_xyz[1])
+        msg.twist.linear.z = float(linear_xyz[2])
+        msg.twist.angular.x = float(angular_xyz[0])
+        msg.twist.angular.y = float(angular_xyz[1])
+        msg.twist.angular.z = float(angular_xyz[2])
+        self._home_zone_twist_pub.publish(msg)
+
+    def _publish_home_zone_zero_twist(self) -> None:
+        self._publish_home_zone_twist((0.0, 0.0, 0.0), (0.0, 0.0, 0.0))
+
+    def _execute_go_home_zone_sequence(self, token: int, home_positions: list[float]) -> None:
+        try:
+            if self._home_zone_aborted(token):
+                return
+
+            self._homing_in_progress = True
+            self._execute_go_home_for_home_zone_sequence(token, home_positions)
+            self._homing_in_progress = False
+            if self._home_zone_aborted(token):
+                return
+
+            time.sleep(0.2)
+            self._wait_for_home_zone_teleop_ready(timeout_sec=2.0)
+            time.sleep(0.1)
+            current_pose = self._wait_for_home_zone_pose(timeout_sec=2.0)
+            if current_pose is None:
+                raise RuntimeError("未拿到当前末端位姿，无法执行 Home Zone")
+            current_pos, current_quat = current_pose
+
+            translation_offset, rotation_offset = sample_home_zone_pose_offsets(
+                list(self.get_parameter("home_zone_translation_min_m").value)[:3],
+                list(self.get_parameter("home_zone_translation_max_m").value)[:3],
+                list(self.get_parameter("home_zone_rotation_min_deg").value)[:3],
+                list(self.get_parameter("home_zone_rotation_max_deg").value)[:3],
+            )
+            target_pos, target_quat = compose_pose_with_rpy_offset(
+                current_pos,
+                current_quat,
+                translation_offset,
+                rotation_offset,
+            )
+            self.get_logger().info(
+                "Home Zone target sampled from current pose: "
+                f"offset_xyz={np.array2string(translation_offset, precision=4)} "
+                f"offset_rpy_deg={np.array2string(np.rad2deg(rotation_offset), precision=2)} "
+                f"{pose_to_string(target_pos, target_quat)}"
+            )
+
+            self._ensure_home_zone_servo_started()
+            max_linear_vel = max(1e-3, float(self.get_parameter("home_zone_max_linear_vel").value))
+            max_angular_vel = max(1e-3, float(self.get_parameter("home_zone_max_angular_vel").value))
+            linear_gain = max(0.1, float(self.get_parameter("home_zone_linear_gain").value))
+            angular_gain = max(0.1, float(self.get_parameter("home_zone_angular_gain").value))
+            position_tolerance_m = max(1e-3, float(self.get_parameter("home_zone_position_tolerance_m").value))
+            rotation_tolerance_deg = max(0.1, float(self.get_parameter("home_zone_rotation_tolerance_deg").value))
+            configured_timeout = float(self.get_parameter("home_zone_timeout_sec").value)
+            dynamic_timeout = max(
+                configured_timeout,
+                2.0 + 1.5 * float(np.linalg.norm(translation_offset)) / max_linear_vel,
+                1.5 + 1.5 * float(np.linalg.norm(rotation_offset)) / max_angular_vel,
+            )
+            success, pos_err_m, rot_err_deg = drive_pose_target(
+                self._get_home_zone_pose_snapshot,
+                self._publish_home_zone_twist,
+                self._publish_home_zone_zero_twist,
+                target_pos,
+                target_quat,
+                linear_gain=linear_gain,
+                angular_gain=angular_gain,
+                max_linear_vel=max_linear_vel,
+                max_angular_vel=max_angular_vel,
+                position_tolerance_m=position_tolerance_m,
+                rotation_tolerance_deg=rotation_tolerance_deg,
+                timeout_sec=dynamic_timeout,
+                rate_hz=float(self.get_parameter("home_zone_rate_hz").value),
+                settle_sec=0.15,
+                should_abort_fn=lambda: self._home_zone_aborted(token),
+            )
+            level = self.get_logger().info if success else self.get_logger().warn
+            level(
+                f"Home Zone {'reached' if success else 'stopped'} "
+                f"residual_pos={pos_err_m:.4f}m residual_rot={rot_err_deg:.2f}deg"
+            )
+        except Exception as exc:
+            self.get_logger().error(f"Home Zone sequence failed: {exc}")
+        finally:
+            self._publish_home_zone_active(False)
+            for _ in range(5):
+                self._publish_home_zone_zero_twist()
+                time.sleep(0.02)
+            self._homing_in_progress = False
+            self._home_zone_in_progress = False
 
     def _execute_go_home_sequence(self, home_positions: list) -> None:
         try:
@@ -801,6 +1214,7 @@ class DataCollectorNode(Node):
                 break
 
     def destroy_node(self) -> bool:
+        self._cancel_home_zone("node shutdown")
         self._keyboard_stop_evt.set()
 
         with self._record_lock:

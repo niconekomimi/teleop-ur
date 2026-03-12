@@ -34,6 +34,10 @@ class GuiSettings:
     default_hdf5_filename: str
 
     home_joint_positions: List[float]
+    home_zone_translation_min_m: List[float]
+    home_zone_translation_max_m: List[float]
+    home_zone_rotation_min_deg: List[float]
+    home_zone_rotation_max_deg: List[float]
 
 def _workspace_root_from_file(current_file: str | Path) -> Path:
     current_path = Path(current_file).resolve()
@@ -116,6 +120,10 @@ def load_gui_settings(current_file: str | Path) -> GuiSettings:
         default_hdf5_output_dir=str(output_dir),
         default_hdf5_filename=str(raw.get("default_hdf5_filename", "libero_demos.hdf5")),
         home_joint_positions=[float(v) for v in raw.get("home_joint_positions", [])],
+        home_zone_translation_min_m=[float(v) for v in raw.get("home_zone_translation_min_m", [0.04, 0.04, 0.04])],
+        home_zone_translation_max_m=[float(v) for v in raw.get("home_zone_translation_max_m", [0.08, 0.08, 0.08])],
+        home_zone_rotation_min_deg=[float(v) for v in raw.get("home_zone_rotation_min_deg", [5.0, 5.0, 5.0])],
+        home_zone_rotation_max_deg=[float(v) for v in raw.get("home_zone_rotation_max_deg", [10.0, 10.0, 10.0])],
     )
 
 
@@ -229,16 +237,22 @@ def build_camera_driver_command(camera_driver: str) -> List[str]:
     raise ValueError(f"Unsupported camera driver: {camera_driver}")
 
 
-def build_robot_driver_command(robot_ip: str, reverse_ip: str, ur_type: str) -> List[str]:
+def build_robot_driver_command(robot_ip: str, reverse_ip: str, ur_type: str, gripper_type: str) -> List[str]:
     return [
         "ros2",
         "launch",
-        "ur_robot_driver",
-        "ur_control.launch.py",
+        "teleop_control_py",
+        "control_system.launch.py",
         f"ur_type:={ur_type}",
         f"robot_ip:={robot_ip}",
         f"reverse_ip:={reverse_ip}",
+        f"gripper_type:={gripper_type}",
         "launch_rviz:=false",
+        "launch_moveit_rviz:=false",
+        "launch_servo:=true",
+        "enable_moveit:=true",
+        "enable_camera:=false",
+        "launch_teleop_node:=false",
         "initial_joint_controller:=forward_position_controller",
     ]
 

@@ -23,9 +23,25 @@ teleop_gui:
     default_hdf5_output_dir: /home/rvl/collect_datasets_ws/data
     default_hdf5_filename: libero_demos.hdf5
     home_joint_positions:
-    - 1.524178
-    - -2.100096
-    - 1.86458
-    - -1.344976
-    - -1.575948
-    - 1.528231
+    - 1.4938936233520508
+    - -2.1434758345233362
+    - 1.7811594009399414
+    - -1.2176945845233362
+    - -1.5835722128497522
+    - 1.5020173788070679
+    home_zone_translation_min_m:
+    - 0.04
+    - 0.04
+    - 0.04
+    home_zone_translation_max_m:
+    - 0.08
+    - 0.08
+    - 0.08
+    home_zone_rotation_min_deg:
+    - 5.0
+    - 5.0
+    - 5.0
+    home_zone_rotation_max_deg:
+    - 10.0
+    - 10.0
+    - 10.0

@@ -98,7 +98,9 @@ def adjusted_chunks_like(src: h5py.Dataset | None, data: np.ndarray) -> tuple[in
     data_shape = list(data.shape)
     if len(chunk_shape) != len(data_shape):
         return None
-    chunk_shape[0] = min(chunk_shape[0], data_shape[0]) if data_shape else chunk_shape[0]
+    if any(size <= 0 for size in data_shape):
+        return None
+    chunk_shape = [min(chunk_size, data_size) for chunk_size, data_size in zip(chunk_shape, data_shape)]
     if not all(size > 0 for size in chunk_shape):
         return None
     return tuple(chunk_shape)
@@ -185,7 +187,15 @@ def rebuild_demo(
     include_states: bool,
     compression: str | None,
     compression_opts: int | None,
+    progress_callback=None,
+    progress_prefix: str = "",
 ) -> int:
+    def report_progress(dataset_name: str) -> None:
+        if progress_callback is None:
+            return
+        full_name = f"{progress_prefix}/{dataset_name}" if progress_prefix else dataset_name
+        progress_callback(full_name)
+
     num_samples = infer_demo_length(src_demo)
     obs_group = src_demo.get("obs")
     if not isinstance(obs_group, h5py.Group):
@@ -237,9 +247,13 @@ def rebuild_demo(
     states = np.zeros((num_samples, 110), dtype=np.float32)
 
     copy_attrs(src_demo.attrs, dst_demo.attrs)
+    report_progress("actions")
     create_dataset(dst_demo, "actions", actions, like=actions_src, compression=compression, compression_opts=compression_opts)
+    report_progress("dones")
     create_dataset(dst_demo, "dones", dones, like=actions_src, compression=compression, compression_opts=compression_opts)
+    report_progress("rewards")
     create_dataset(dst_demo, "rewards", rewards, like=actions_src, compression=compression, compression_opts=compression_opts)
+    report_progress("robot_states")
     create_dataset(
         dst_demo,
         "robot_states",
@@ -249,6 +263,7 @@ def rebuild_demo(
         compression_opts=compression_opts,
     )
     if include_states:
+        report_progress("states")
         create_dataset(
             dst_demo,
             "states",
@@ -259,6 +274,7 @@ def rebuild_demo(
         )
 
     dst_obs = dst_demo.create_group("obs")
+    report_progress("obs/agentview_rgb")
     create_dataset(
         dst_obs,
         "agentview_rgb",
@@ -267,6 +283,7 @@ def rebuild_demo(
         compression=compression,
         compression_opts=compression_opts,
     )
+    report_progress("obs/eye_in_hand_rgb")
     create_dataset(
         dst_obs,
         "eye_in_hand_rgb",
@@ -275,8 +292,11 @@ def rebuild_demo(
         compression=compression,
         compression_opts=compression_opts,
     )
+    report_progress("obs/ee_pos")
     create_dataset(dst_obs, "ee_pos", ee_pos, like=ee_pos_src, compression=compression, compression_opts=compression_opts)
+    report_progress("obs/ee_ori")
     create_dataset(dst_obs, "ee_ori", ee_ori, like=ee_quat_src, compression=compression, compression_opts=compression_opts)
+    report_progress("obs/ee_states")
     create_dataset(
         dst_obs,
         "ee_states",
@@ -285,6 +305,7 @@ def rebuild_demo(
         compression=compression,
         compression_opts=compression_opts,
     )
+    report_progress("obs/gripper_states")
     create_dataset(
         dst_obs,
         "gripper_states",
@@ -293,6 +314,7 @@ def rebuild_demo(
         compression=compression,
         compression_opts=compression_opts,
     )
+    report_progress("obs/joint_states")
     create_dataset(
         dst_obs,
         "joint_states",
@@ -320,6 +342,7 @@ def rebuild_file(
     renumber: bool = True,
     compression: str | None = "inherit",
     compression_opts: int | None = None,
+    progress_callback=None,
 ) -> list[tuple[str, str, int]]:
     if not os.path.exists(input_path):
         raise FileNotFoundError(f"Input file not found: {input_path}")
@@ -353,6 +376,8 @@ def rebuild_file(
                 include_states=include_states,
                 compression=compression,
                 compression_opts=compression_opts,
+                progress_callback=progress_callback,
+                progress_prefix=target_name,
             )
             results.append((source_name, target_name, num_samples))
         return results
