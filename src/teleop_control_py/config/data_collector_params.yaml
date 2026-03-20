@@ -14,6 +14,8 @@ data_collector:
     # realsense | oakd
     global_camera_source: "realsense"
     wrist_camera_source: "oakd"
+    global_camera_serial_number: ""
+    wrist_camera_serial_number: ""
 
     # ==========================================================
     # 3) 机器人状态输入

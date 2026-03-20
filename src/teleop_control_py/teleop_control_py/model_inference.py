@@ -24,6 +24,7 @@ except Exception:  # noqa: BLE001
         raise PackageNotFoundError()
 
 from teleop_control_py.transform_utils import center_crop_square_and_resize_rgb
+from teleop_control_py.hardware.factory import HardwareFactory
 
 
 def _discover_workspace_root() -> Path:
@@ -119,12 +120,6 @@ def _load_real_robot_policy_class():
     from real_robot.infer import RealRobotPolicy
 
     return RealRobotPolicy
-
-
-def _load_camera_client_classes():
-    from teleop_control_py.camera_client import OAKClient, RealSenseClient
-
-    return RealSenseClient, OAKClient
 
 
 def _is_checkpoint_dir(path: Path) -> bool:
@@ -288,6 +283,8 @@ class InferenceWorker(QThread):
         loop_hz: float,
         device: str | None = None,
         state_provider: Optional[Callable[[], Optional[np.ndarray]]] = None,
+        global_camera_serial_number: str = "",
+        wrist_camera_serial_number: str = "",
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -296,6 +293,8 @@ class InferenceWorker(QThread):
         self.task_embedding_path = str(Path(task_embedding_path).expanduser().resolve())
         self.global_camera_source = _normalize_camera_source(global_camera_source)
         self.wrist_camera_source = _normalize_camera_source(wrist_camera_source)
+        self.global_camera_serial_number = str(global_camera_serial_number).strip()
+        self.wrist_camera_serial_number = str(wrist_camera_serial_number).strip()
         self.loop_hz = max(0.2, float(loop_hz))
         self.device = str(device).strip() if device else None
         self.state_provider = state_provider
@@ -345,13 +344,12 @@ class InferenceWorker(QThread):
         )
         self.status_signal.emit(f"任务已切换 | {self.task_name}")
 
-    def _build_camera_client(self, source: str):
-        RealSenseClient, OAKClient = _load_camera_client_classes()
-        if source == "realsense":
-            return RealSenseClient(logger=self)
-        if source == "oakd":
-            return OAKClient(logger=self)
-        raise ValueError(f"Unsupported camera source: {source}")
+    def _build_camera_client(self, source: str, serial_number: str = ""):
+        return HardwareFactory.create_camera(
+            source,
+            serial_number=serial_number,
+            logger=self,
+        )
 
     @staticmethod
     def _resolve_image_size(policy, obs_key: str) -> int:
@@ -428,8 +426,14 @@ class InferenceWorker(QThread):
             wrist_size = self._resolve_image_size(policy, "eye_in_hand_image")
 
             self.status_signal.emit("打开相机中")
-            global_camera = self._build_camera_client(self.global_camera_source)
-            wrist_camera = self._build_camera_client(self.wrist_camera_source)
+            global_camera = self._build_camera_client(
+                self.global_camera_source,
+                self.global_camera_serial_number,
+            )
+            wrist_camera = self._build_camera_client(
+                self.wrist_camera_source,
+                self.wrist_camera_serial_number,
+            )
             global_bgr, wrist_bgr = self._wait_for_initial_frames(global_camera, wrist_camera)
             if not self._running:
                 return
@@ -441,6 +445,7 @@ class InferenceWorker(QThread):
                 "推理已启动: "
                 f"model={self.checkpoint_dir}, task={self.task_name}, "
                 f"embedding={self.task_embedding_path}, cameras=({self.global_camera_source}, {self.wrist_camera_source}), "
+                f"serials=({self.global_camera_serial_number or 'auto'}, {self.wrist_camera_serial_number or 'auto'}), "
                 f"device={self.device or 'auto'}"
             )
 

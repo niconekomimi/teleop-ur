@@ -24,7 +24,7 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import Float32, Float32MultiArray
 from std_srvs.srv import Trigger
 
-from .camera_client import OAKClient, RealSenseClient
+from .hardware.factory import HardwareFactory
 from .hdf5_writer import Command, HDF5WriterThread, Sample
 from .preview_api import PreviewApiServer
 from .transform_utils import _clamp, center_crop_square_and_resize_rgb, compose_eef_action
@@ -50,6 +50,8 @@ class DataCollectorNode(Node):
         self.declare_parameter("record_fps", 10.0)
         self.declare_parameter("global_camera_source", "realsense")
         self.declare_parameter("wrist_camera_source", "oakd")
+        self.declare_parameter("global_camera_serial_number", "")
+        self.declare_parameter("wrist_camera_serial_number", "")
         self.declare_parameter("joint_states_topic", "/joint_states")
         self.declare_parameter("tool_pose_topic", "/tcp_pose_broadcaster/pose")
         self.declare_parameter("servo_twist_topic", "/servo_node/delta_twist_cmds")
@@ -170,11 +172,13 @@ class DataCollectorNode(Node):
         )
         self._writer.start()
 
-        self._camera_instances: Dict[str, object] = {}
+        self._camera_instances: Dict[tuple[str, str], object] = {}
         global_source = self._normalize_camera_source(self.get_parameter("global_camera_source").value)
         wrist_source = self._normalize_camera_source(self.get_parameter("wrist_camera_source").value)
-        self.global_cam = self._get_or_create_camera(global_source)
-        self.wrist_cam = self._get_or_create_camera(wrist_source)
+        self._global_camera_serial_number = str(self.get_parameter("global_camera_serial_number").value).strip()
+        self._wrist_camera_serial_number = str(self.get_parameter("wrist_camera_serial_number").value).strip()
+        self.global_cam = self._get_or_create_camera(global_source, self._global_camera_serial_number)
+        self.wrist_cam = self._get_or_create_camera(wrist_source, self._wrist_camera_serial_number)
         self._global_camera_source = global_source
         self._wrist_camera_source = wrist_source
 
@@ -222,7 +226,8 @@ class DataCollectorNode(Node):
         self.get_logger().info(
             "DataCollectorNode ready. Services: ~/start, ~/stop. "
             f"Global camera={self._global_camera_source}, Wrist camera={self._wrist_camera_source}, "
-            f"Gripper={gripper_topic}, Output={self._output_path}, FPS={self._record_fps:.2f}"
+            f"Gripper={gripper_topic}, Output={self._output_path}, FPS={self._record_fps:.2f}, "
+            f"Global SN={self._global_camera_serial_number or 'auto'}, Wrist SN={self._wrist_camera_serial_number or 'auto'}"
         )
 
         if self._demo_index > 0:
@@ -241,22 +246,24 @@ class DataCollectorNode(Node):
         self.get_logger().warn(f"未知相机来源 '{source}'，回退到 realsense。")
         return "realsense"
 
-    def _get_or_create_camera(self, source: str) -> Optional[object]:
-        if source in self._camera_instances:
-            return self._camera_instances[source]
+    def _get_or_create_camera(self, source: str, serial_number: str = "") -> Optional[object]:
+        cache_key = (source, str(serial_number).strip())
+        if cache_key in self._camera_instances:
+            return self._camera_instances[cache_key]
 
         try:
-            if source == "realsense":
-                camera = RealSenseClient(logger=self.get_logger())
-            elif source == "oakd":
-                camera = OAKClient(logger=self.get_logger())
-            else:
-                raise ValueError(f"Unsupported camera source: {source}")
+            camera = HardwareFactory.create_camera(
+                source,
+                serial_number=serial_number,
+                logger=self.get_logger(),
+            )
         except Exception as exc:  # noqa: BLE001
-            self.get_logger().error(f"初始化 {source} 相机失败: {exc!r}")
+            self.get_logger().error(
+                f"初始化 {source} 相机失败 (serial={serial_number or 'auto'}): {exc!r}"
+            )
             camera = None
 
-        self._camera_instances[source] = camera
+        self._camera_instances[cache_key] = camera
         return camera
 
     def _resolve_gripper_topic(self) -> str:

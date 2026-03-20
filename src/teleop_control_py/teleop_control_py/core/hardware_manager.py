@@ -86,16 +86,8 @@ class HardwareManager:
             if self.normalize_camera_source(source) in self.CAMERA_NAMES
         }
 
-        if requester != "collector":
-            for source in sorted(requested_set):
-                if collector_usage.get(source, False):
-                    conflicts.append(f"采集节点正在占用 {source}")
-
-        if requester != "inference":
-            for source in sorted(requested_set):
-                if inference_usage.get(source, False):
-                    conflicts.append(f"推理模块正在占用 {source}")
-
+        # Collector and inference now share cameras through the shm microservice,
+        # so only direct ROS2 drivers remain exclusive camera owners.
         if requester in {"collector", "inference"}:
             for source in sorted(requested_set):
                 if source in active_camera_drivers:
@@ -113,6 +105,8 @@ class HardwareManager:
             for source in context.active_camera_drivers
         }
 
+        if inference_usage.get(normalized, False) and collector_usage.get(normalized, False):
+            return "采集/推理共享", "#e67700"
         if inference_usage.get(normalized, False):
             return "推理模块占用", "#e67700"
         if collector_usage.get(normalized, False):
