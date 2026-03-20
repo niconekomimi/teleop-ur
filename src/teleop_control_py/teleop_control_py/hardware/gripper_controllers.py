@@ -11,7 +11,7 @@ from rclpy.action import ActionClient
 from rclpy.node import Node
 from std_msgs.msg import Float32, Float32MultiArray
 
-from .transform_utils import _clamp
+from ..utils.transform_utils import _clamp
 
 try:
     from robotiq_2f_gripper_msgs.action import MoveTwoFingerGripper

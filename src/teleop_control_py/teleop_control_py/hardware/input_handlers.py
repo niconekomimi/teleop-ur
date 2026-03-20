@@ -12,14 +12,18 @@ from typing import Optional, Sequence
 import cv2
 from cv_bridge import CvBridge
 from geometry_msgs.msg import PoseStamped, Twist
-import mediapipe as mp
 import numpy as np
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CameraInfo, Image, Joy
 
-from .home_zone_utils import compute_pose_error
-from .transform_utils import (
+try:
+    import mediapipe as mp
+except Exception:  # pragma: no cover - 运行环境未安装时保持 joy 路径可导入
+    mp = None
+
+from ..utils.home_zone_utils import compute_pose_error
+from ..utils.transform_utils import (
     _clamp,
     map_axis_linear,
     map_axis_nonlinear,
@@ -292,6 +296,8 @@ class MediaPipeInputHandler(InputHandlerBase):
 
     def __init__(self, node: Node) -> None:
         super().__init__(node)
+        if mp is None:
+            raise ImportError("MediaPipeInputHandler requires the 'mediapipe' package to be installed.")
         self._motion_mode = str(node.get_parameter("mediapipe_motion_mode").value).strip().lower()
         self._deadzone = float(node.get_parameter("mediapipe_deadzone").value)
         self._linear_scale = float(node.get_parameter("mediapipe_linear_scale").value)

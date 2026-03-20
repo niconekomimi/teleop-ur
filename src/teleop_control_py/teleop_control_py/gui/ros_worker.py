@@ -15,8 +15,8 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import Float32, Float32MultiArray
 from std_srvs.srv import Trigger
 
-from ..gripper_controllers import QbSoftHandController, RobotiqController
-from ..servo_pose_follower import ServoPoseFollower
+from ..hardware.gripper_controllers import QbSoftHandController, RobotiqController
+from ..hardware.servo_pose_follower import ServoPoseFollower
 
 
 class ROS2Worker(QThread):

@@ -36,7 +36,7 @@ from teleop_control_py.gui_support import (
     load_gui_settings,
     save_gui_settings_overrides,
 )
-from teleop_control_py.model_inference import (
+from teleop_control_py.data.model_inference import (
     InferenceWorker,
     MODELS_ROOT,
     TASK_EMBEDDINGS_ROOT,

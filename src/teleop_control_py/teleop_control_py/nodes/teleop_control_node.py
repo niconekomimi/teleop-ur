@@ -13,10 +13,10 @@ from rclpy.node import Node
 from std_msgs.msg import Bool
 from std_srvs.srv import Trigger
 
-from .gripper_controllers import QbSoftHandController, RobotiqController
-from .input_handlers import JoyInputHandler, MediaPipeInputHandler
-from .servo_pose_follower import ServoPoseFollower
-from .transform_utils import apply_velocity_limits
+from ..hardware.gripper_controllers import QbSoftHandController, RobotiqController
+from ..hardware.input_handlers import JoyInputHandler, MediaPipeInputHandler
+from ..hardware.servo_pose_follower import ServoPoseFollower
+from ..utils.transform_utils import apply_velocity_limits
 
 
 class TeleopControlNode(Node):

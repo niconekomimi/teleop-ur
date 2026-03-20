@@ -20,8 +20,13 @@ from std_msgs.msg import Bool
 from std_srvs.srv import Trigger
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
-from .home_zone_utils import compose_pose_with_rpy_offset, drive_pose_target, pose_to_string, sample_home_zone_pose_offsets
-from .ur_kinematics import try_forward_kinematics
+from ..utils.home_zone_utils import (
+    compose_pose_with_rpy_offset,
+    drive_pose_target,
+    pose_to_string,
+    sample_home_zone_pose_offsets,
+)
+from ..utils.ur_kinematics import try_forward_kinematics
 
 
 class RobotCommanderNode(Node):

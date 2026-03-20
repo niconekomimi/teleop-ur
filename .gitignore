@@ -6,3 +6,5 @@ log/
 data/
 test/
 models/
+__pycache__/
+*.py[cod]

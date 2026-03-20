@@ -12,12 +12,12 @@ from pathlib import Path
 import h5py
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-MODULE_PATH = REPO_ROOT / "src" / "teleop_control_py" / "teleop_control_py" / "dataset_rebuilder.py"
+MODULE_PATH = REPO_ROOT / "src" / "teleop_control_py" / "teleop_control_py" / "data" / "dataset_rebuilder.py"
 
 if not MODULE_PATH.exists():
     raise FileNotFoundError(f"Cannot find dataset rebuilder module: {MODULE_PATH}")
 
-_SPEC = importlib.util.spec_from_file_location("teleop_control_py.dataset_rebuilder", MODULE_PATH)
+_SPEC = importlib.util.spec_from_file_location("teleop_control_py.data.dataset_rebuilder", MODULE_PATH)
 if _SPEC is None or _SPEC.loader is None:
     raise ImportError(f"Failed to load module spec from: {MODULE_PATH}")
 

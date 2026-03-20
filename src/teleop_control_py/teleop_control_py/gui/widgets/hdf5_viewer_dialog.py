@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from teleop_control_py.dataset_rebuilder import rebuild_file, quat_to_rotvec_xyzw, sorted_demo_names
+from teleop_control_py.data.dataset_rebuilder import rebuild_file, quat_to_rotvec_xyzw, sorted_demo_names
 
 
 class HDF5ViewerDialog(QDialog):

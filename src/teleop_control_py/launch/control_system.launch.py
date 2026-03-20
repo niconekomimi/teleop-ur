@@ -332,7 +332,7 @@ def _maybe_include_data_collector(context, *args, **kwargs):
 	actions.append(
 		LogInfo(
 			msg=(
-				"[control_system] Included teleop_control_py/data_collector_node "
+				"[control_system] Included teleop_control_py.nodes.data_collector_node "
 				f"with end_effector_type={collector_ee}"
 			)
 		)

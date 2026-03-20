@@ -25,10 +25,10 @@ setup(
     tests_require=["pytest"],
     entry_points={
         "console_scripts": [
-            "teleop_control_node = teleop_control_py.teleop_control_node:main",
-            "robot_commander_node = teleop_control_py.robot_commander_node:main",
-            "servo_pose_follower = teleop_control_py.servo_pose_follower:main",
-            "data_collector_node = teleop_control_py.data_collector_node:main",
+            "teleop_control_node = teleop_control_py.nodes.teleop_control_node:main",
+            "robot_commander_node = teleop_control_py.nodes.robot_commander_node:main",
+            "servo_pose_follower = teleop_control_py.hardware.servo_pose_follower:main",
+            "data_collector_node = teleop_control_py.nodes.data_collector_node:main",
             "teleop_gui = teleop_control_py.gui.app:main",
         ],
     },

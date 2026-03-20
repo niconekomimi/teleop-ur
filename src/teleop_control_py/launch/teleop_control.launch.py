@@ -201,7 +201,7 @@ def _launch_teleop_node(context, *args, **kwargs):
             cmd=[
                 LaunchConfiguration("python_executable"),
                 "-m",
-                "teleop_control_py.teleop_control_node",
+                "teleop_control_py.nodes.teleop_control_node",
                 "--ros-args",
                 "-r",
                 "__node:=teleop_control_node",
