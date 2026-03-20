@@ -1,12 +1,9 @@
-import math
 import re
 import threading
 import time
 
 import numpy as np
 import rclpy
-from builtin_interfaces.msg import Duration as DurationMsg
-from controller_manager_msgs.srv import SwitchController
 from geometry_msgs.msg import PoseStamped, Twist
 from geometry_msgs.msg import TwistStamped
 from PySide6.QtCore import QThread, Signal
@@ -17,7 +14,6 @@ from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Float32, Float32MultiArray
 from std_srvs.srv import Trigger
-from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 from ..gripper_controllers import QbSoftHandController, RobotiqController
 from ..servo_pose_follower import ServoPoseFollower
@@ -50,9 +46,10 @@ class ROS2Worker(QThread):
         self._home_joint_trajectory_topic = "/scaled_joint_trajectory_controller/joint_trajectory"
         self._teleop_controller = "forward_position_controller"
         self._trajectory_controller = "scaled_joint_trajectory_controller"
-        self._home_pub = None
-        self._switch_ctrl_client = None
-        self._homing_in_progress = False
+        self._home_zone_translation_min_m = [0.04, 0.04, 0.04]
+        self._home_zone_translation_max_m = [0.08, 0.08, 0.08]
+        self._home_zone_rotation_min_deg = [5.0, 5.0, 5.0]
+        self._home_zone_rotation_max_deg = [10.0, 10.0, 10.0]
         self._inference_gripper_type = "robotiq"
         self._inference_control_hz = 50.0
         self._inference_control_enabled = False
@@ -71,6 +68,8 @@ class ROS2Worker(QThread):
         self.home_zone_cli = None
         self.cancel_home_zone_cli = None
         self.set_param_cli = None
+        self._pending_go_home = False
+        self._pending_go_home_zone = False
 
         self.is_recording = False
         self.start_time = 0.0
@@ -138,6 +137,10 @@ class ROS2Worker(QThread):
         trajectory_topic: str = "/scaled_joint_trajectory_controller/joint_trajectory",
         teleop_controller: str = "forward_position_controller",
         trajectory_controller: str = "scaled_joint_trajectory_controller",
+        home_zone_translation_min_m=None,
+        home_zone_translation_max_m=None,
+        home_zone_rotation_min_deg=None,
+        home_zone_rotation_max_deg=None,
     ) -> None:
         try:
             values = [float(value) for value in list(joint_positions)[:6]]
@@ -154,13 +157,89 @@ class ROS2Worker(QThread):
         self._home_joint_trajectory_topic = str(trajectory_topic).strip() or self._home_joint_trajectory_topic
         self._teleop_controller = str(teleop_controller).strip() or self._teleop_controller
         self._trajectory_controller = str(trajectory_controller).strip() or self._trajectory_controller
+        self._home_zone_translation_min_m = self._normalize_vector_param(
+            home_zone_translation_min_m,
+            self._home_zone_translation_min_m,
+        )
+        self._home_zone_translation_max_m = self._normalize_vector_param(
+            home_zone_translation_max_m,
+            self._home_zone_translation_max_m,
+        )
+        self._home_zone_rotation_min_deg = self._normalize_vector_param(
+            home_zone_rotation_min_deg,
+            self._home_zone_rotation_min_deg,
+        )
+        self._home_zone_rotation_max_deg = self._normalize_vector_param(
+            home_zone_rotation_max_deg,
+            self._home_zone_rotation_max_deg,
+        )
 
-        if self.node is not None and self._home_pub is not None:
-            try:
-                self.node.destroy_publisher(self._home_pub)
-            except Exception:
-                pass
-            self._home_pub = self.node.create_publisher(JointTrajectory, self._home_joint_trajectory_topic, 10)
+        self._sync_commander_home_config()
+
+    def _normalize_vector_param(self, values, fallback):
+        try:
+            normalized = [float(value) for value in list(values)[:3]]
+        except Exception:
+            normalized = []
+        return normalized if len(normalized) == 3 else list(fallback)
+
+    def _build_commander_param_msgs(self):
+        params = [
+            Parameter("home_joint_positions", Parameter.Type.DOUBLE_ARRAY, list(self._home_joint_positions[:6])),
+            Parameter("home_duration_sec", Parameter.Type.DOUBLE, float(self._home_duration_sec)),
+            Parameter("joint_names", Parameter.Type.STRING_ARRAY, [str(name) for name in self._home_joint_names[:6]]),
+            Parameter("home_joint_trajectory_topic", Parameter.Type.STRING, self._home_joint_trajectory_topic),
+            Parameter("teleop_controller", Parameter.Type.STRING, self._teleop_controller),
+            Parameter("trajectory_controller", Parameter.Type.STRING, self._trajectory_controller),
+            Parameter(
+                "home_zone_translation_min_m",
+                Parameter.Type.DOUBLE_ARRAY,
+                list(self._home_zone_translation_min_m[:3]),
+            ),
+            Parameter(
+                "home_zone_translation_max_m",
+                Parameter.Type.DOUBLE_ARRAY,
+                list(self._home_zone_translation_max_m[:3]),
+            ),
+            Parameter(
+                "home_zone_rotation_min_deg",
+                Parameter.Type.DOUBLE_ARRAY,
+                list(self._home_zone_rotation_min_deg[:3]),
+            ),
+            Parameter(
+                "home_zone_rotation_max_deg",
+                Parameter.Type.DOUBLE_ARRAY,
+                list(self._home_zone_rotation_max_deg[:3]),
+            ),
+        ]
+        return [param.to_parameter_msg() for param in params]
+
+    def _sync_commander_home_config(self, *, log_failures: bool = False) -> bool:
+        if self.set_param_cli is None:
+            return False
+        if not self.set_param_cli.wait_for_service(timeout_sec=0.2):
+            if log_failures:
+                self.log_signal.emit("未检测到 /commander/set_parameters，无法同步 Home 配置。")
+            return False
+
+        request = SetParameters.Request()
+        request.parameters = self._build_commander_param_msgs()
+        future = self.set_param_cli.call_async(request)
+        if log_failures:
+            future.add_done_callback(self._on_sync_commander_home_config_done)
+        return True
+
+    def _on_sync_commander_home_config_done(self, future) -> None:
+        try:
+            response = future.result()
+            results = getattr(response, "results", None)
+            if not results:
+                return
+            failures = [result.reason for result in results if not bool(getattr(result, "successful", False))]
+            if failures:
+                self.log_signal.emit(f"同步 commander Home 配置失败: {failures[0]}")
+        except Exception as exc:
+            self.log_signal.emit(f"同步 commander Home 配置异常: {exc}")
 
     def _set_or_declare_parameter(self, name: str, value) -> None:
         if self.node is None:
@@ -269,11 +348,6 @@ class ROS2Worker(QThread):
         rclpy.init()
         self.node = Node("teleop_gui_node")
         self._apply_inference_control_parameters()
-        self._home_pub = self.node.create_publisher(JointTrajectory, self._home_joint_trajectory_topic, 10)
-        self._switch_ctrl_client = self.node.create_client(
-            SwitchController,
-            "/controller_manager/switch_controller",
-        )
         self._inference_control_timer = self.node.create_timer(
             1.0 / max(self._inference_control_hz, 1.0),
             self._publish_inference_control_step,
@@ -292,10 +366,17 @@ class ROS2Worker(QThread):
 
         self.start_cli = self.node.create_client(Trigger, "/data_collector/start")
         self.stop_cli = self.node.create_client(Trigger, "/data_collector/stop")
-        self.home_cli = self.node.create_client(Trigger, "/data_collector/go_home")
-        self.home_zone_cli = self.node.create_client(Trigger, "/data_collector/go_home_zone")
-        self.cancel_home_zone_cli = self.node.create_client(Trigger, "/data_collector/cancel_home_zone")
-        self.set_param_cli = self.node.create_client(SetParameters, "/data_collector/set_parameters")
+        self.home_cli = self.node.create_client(Trigger, "/commander/go_home")
+        self.home_zone_cli = self.node.create_client(Trigger, "/commander/go_home_zone")
+        self.cancel_home_zone_cli = self.node.create_client(Trigger, "/commander/cancel_home_zone")
+        self.set_param_cli = self.node.create_client(SetParameters, "/commander/set_parameters")
+        self._sync_commander_home_config()
+        if self._pending_go_home:
+            self._pending_go_home = False
+            self.call_go_home()
+        if self._pending_go_home_zone:
+            self._pending_go_home_zone = False
+            self.call_go_home_zone()
 
         self.stats_timer = self.node.create_timer(0.1, self.stats_timer_callback)
 
@@ -397,6 +478,9 @@ class ROS2Worker(QThread):
             pass
 
     def call_start_record(self):
+        if self.start_cli is None:
+            self.log_signal.emit("ROS 监听器初始化中，请稍后再试。")
+            return
         if self.start_cli.wait_for_service(timeout_sec=1.0):
             future = self.start_cli.call_async(Trigger.Request())
             future.add_done_callback(self.start_record_done)
@@ -404,6 +488,9 @@ class ROS2Worker(QThread):
             self.log_signal.emit("错误: 找不到 /data_collector/start 服务")
 
     def call_stop_record(self):
+        if self.stop_cli is None:
+            self.log_signal.emit("ROS 监听器初始化中，请稍后再试。")
+            return
         if self.stop_cli.wait_for_service(timeout_sec=1.0):
             future = self.stop_cli.call_async(Trigger.Request())
             future.add_done_callback(self.stop_record_done)
@@ -415,21 +502,30 @@ class ROS2Worker(QThread):
             self.set_inference_execution_enabled(False)
             self.log_signal.emit("回 Home 前已停止推理执行。")
 
-        if self.home_cli.wait_for_service(timeout_sec=1.0):
+        if self.home_cli is None:
+            self._pending_go_home = True
+            self.log_signal.emit("ROS 监听器初始化中，Home 请求将在就绪后自动发送。")
+            return
+
+        if self.home_cli is not None and self.home_cli.wait_for_service(timeout_sec=1.0):
             future = self.home_cli.call_async(Trigger.Request())
             future.add_done_callback(self.go_home_done)
             return
 
-        self.log_signal.emit("未检测到 /data_collector/go_home 服务，改用本地 Home 轨迹。")
-        self._start_local_go_home()
+        self.log_signal.emit("错误: 找不到 /commander/go_home 服务，请先启动机械臂驱动或遥操作系统。")
 
     def call_go_home_zone(self):
         if self._inference_control_enabled:
             self.set_inference_execution_enabled(False)
             self.log_signal.emit("回 Home Zone 前已停止推理执行。")
 
+        if self.home_zone_cli is None:
+            self._pending_go_home_zone = True
+            self.log_signal.emit("ROS 监听器初始化中，Home Zone 请求将在就绪后自动发送。")
+            return
+
         if self.home_zone_cli is None or not self.home_zone_cli.wait_for_service(timeout_sec=1.0):
-            self.log_signal.emit("错误: 找不到 /data_collector/go_home_zone 服务。Home Zone 仅在采集节点内实现。")
+            self.log_signal.emit("错误: 找不到 /commander/go_home_zone 服务，请先启动机械臂驱动或遥操作系统。")
             return
 
         future = self.home_zone_cli.call_async(Trigger.Request())
@@ -444,77 +540,19 @@ class ROS2Worker(QThread):
         except Exception:
             pass
 
-    def _start_local_go_home(self) -> None:
-        if self._homing_in_progress:
-            self.log_signal.emit("Home 轨迹已在执行中。")
-            return
-        if len(self._home_joint_positions) != 6:
-            self.log_signal.emit("错误: Home 点配置无效，需要 6 个关节角。")
-            return
-        self._homing_in_progress = True
-        threading.Thread(target=self._execute_local_go_home_sequence, daemon=True).start()
-
-    def _execute_local_go_home_sequence(self) -> None:
-        try:
-            if self._home_pub is None or self.node is None:
-                self.log_signal.emit("错误: ROS2Worker 尚未就绪，无法执行 Home 轨迹。")
-                return
-
-            req_to_traj = SwitchController.Request()
-            req_to_traj.activate_controllers = [self._trajectory_controller]
-            req_to_traj.deactivate_controllers = [self._teleop_controller]
-            req_to_traj.strictness = SwitchController.Request.BEST_EFFORT
-
-            if self._switch_ctrl_client is not None and self._switch_ctrl_client.wait_for_service(timeout_sec=1.0):
-                self.log_signal.emit(f"切换到 {self._trajectory_controller}，准备执行 Home 轨迹。")
-                self._switch_ctrl_client.call_async(req_to_traj)
-                time.sleep(0.5)
-            else:
-                self.log_signal.emit("未检测到 controller_manager，直接尝试发布 Home 轨迹。")
-
-            trajectory = JointTrajectory()
-            trajectory.joint_names = [str(name) for name in self._home_joint_names[:6]]
-
-            point = JointTrajectoryPoint()
-            point.positions = [float(value) for value in self._home_joint_positions[:6]]
-            duration = max(0.1, float(self._home_duration_sec))
-            seconds = int(duration)
-            nanoseconds = int((duration - seconds) * 1e9)
-            point.time_from_start = DurationMsg(sec=seconds, nanosec=nanoseconds)
-            trajectory.points = [point]
-            self._home_pub.publish(trajectory)
-            self.log_signal.emit(f"已发布 Home 轨迹，预计耗时 {duration:.2f}s。")
-
-            time.sleep(duration + 0.5)
-
-            req_to_teleop = SwitchController.Request()
-            req_to_teleop.activate_controllers = [self._teleop_controller]
-            req_to_teleop.deactivate_controllers = [self._trajectory_controller]
-            req_to_teleop.strictness = SwitchController.Request.BEST_EFFORT
-
-            if self._switch_ctrl_client is not None and self._switch_ctrl_client.wait_for_service(timeout_sec=1.0):
-                self.log_signal.emit(f"恢复 {self._teleop_controller}。")
-                self._switch_ctrl_client.call_async(req_to_teleop)
-
-            self.log_signal.emit("Home 轨迹执行完成。")
-        except Exception as exc:
-            self.log_signal.emit(f"本地 Home 轨迹执行失败: {exc}")
-        finally:
-            self._homing_in_progress = False
-
     def call_set_home_from_current(self):
         joints = [float(value) for value in self.robot_state.get("joints", [])]
         if len(joints) != 6:
             self.log_signal.emit("错误: 当前关节状态无效，无法设置 Home 点")
             return
 
-        if not self.set_param_cli.wait_for_service(timeout_sec=1.0):
-            self.log_signal.emit("错误: 找不到 /data_collector 参数服务")
+        self._home_joint_positions = list(joints)
+        if self.set_param_cli is None or not self.set_param_cli.wait_for_service(timeout_sec=1.0):
+            self.log_signal.emit("错误: 找不到 /commander 参数服务")
             return
 
-        param = Parameter("home_joint_positions", Parameter.Type.DOUBLE_ARRAY, joints)
         req = SetParameters.Request()
-        req.parameters = [param.to_parameter_msg()]
+        req.parameters = self._build_commander_param_msgs()
         future = self.set_param_cli.call_async(req)
         future.add_done_callback(self.set_home_done)
 

@@ -74,11 +74,11 @@ class TeleopControlNode(Node):
         self.arm_ctrl = ServoPoseFollower(self)
         self._home_zone_active_sub = self.create_subscription(
             Bool,
-            "/data_collector/home_zone_active",
+            "/commander/home_zone_active",
             self._on_home_zone_active,
             10,
         )
-        self._home_zone_cancel_client = self.create_client(Trigger, "/data_collector/cancel_home_zone")
+        self._home_zone_cancel_client = self.create_client(Trigger, "/commander/cancel_home_zone")
 
         self._timer = self.create_timer(1.0 / self._control_hz, self._control_loop)
         self.get_logger().info(

@@ -343,6 +343,7 @@ def _maybe_include_data_collector(context, *args, **kwargs):
 def generate_launch_description() -> LaunchDescription:
 	teleop_share = get_package_share_directory("teleop_control_py")
 	default_params = os.path.join(teleop_share, "config", "teleop_params.yaml")
+	default_commander_params = os.path.join(teleop_share, "config", "robot_commander_params.yaml")
 
 	params_file_arg = DeclareLaunchArgument(
 		"params_file",
@@ -481,6 +482,11 @@ def generate_launch_description() -> LaunchDescription:
 		default_value=os.path.join(teleop_share, "config", "data_collector_params.yaml"),
 		description="Path to data collector parameter file",
 	)
+	robot_commander_params_file_arg = DeclareLaunchArgument(
+		"robot_commander_params_file",
+		default_value=default_commander_params,
+		description="Path to robot commander parameter file",
+	)
 
 	ur_driver_share = get_package_share_directory("ur_robot_driver")
 	ur_launch = IncludeLaunchDescription(
@@ -492,6 +498,17 @@ def generate_launch_description() -> LaunchDescription:
 			"initial_joint_controller": LaunchConfiguration("initial_joint_controller"),
 			"launch_rviz": LaunchConfiguration("launch_rviz"),
 		}.items(),
+	)
+
+	robot_commander_node = Node(
+		package="teleop_control_py",
+		executable="robot_commander_node",
+		name="commander",
+		output="screen",
+		parameters=[
+			LaunchConfiguration("robot_commander_params_file"),
+			{"ur_type": LaunchConfiguration("ur_type")},
+		],
 	)
 
 	teleop_launch = IncludeLaunchDescription(
@@ -537,12 +554,14 @@ def generate_launch_description() -> LaunchDescription:
 			enable_data_collector_arg,
 			launch_teleop_node_arg,
 			data_collector_params_file_arg,
+			robot_commander_params_file_arg,
 			OpaqueFunction(function=_maybe_include_joy_driver),
 			OpaqueFunction(function=_maybe_include_moveit_servo),
 			OpaqueFunction(function=_maybe_include_realsense),
 			OpaqueFunction(function=_maybe_include_end_effector_driver),
 			OpaqueFunction(function=_maybe_include_data_collector),
 			ur_launch,
+			robot_commander_node,
 			teleop_launch,
 		]
 	)

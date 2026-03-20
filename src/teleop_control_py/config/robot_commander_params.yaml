@@ -1,0 +1,38 @@
+commander:
+  ros__parameters:
+    ur_type: "ur5"
+    joint_states_topic: "/joint_states"
+    tool_pose_topic: "/tcp_pose_broadcaster/pose"
+    servo_twist_topic: "/servo_node/delta_twist_cmds"
+
+    joint_names:
+      - shoulder_pan_joint
+      - shoulder_lift_joint
+      - elbow_joint
+      - wrist_1_joint
+      - wrist_2_joint
+      - wrist_3_joint
+
+    pose_max_age_sec: 0.05
+    pose_stamp_zero_is_ref: true
+    pose_use_received_time_fallback: true
+
+    home_joint_trajectory_topic: "/scaled_joint_trajectory_controller/joint_trajectory"
+    home_duration_sec: 3.0
+    home_joint_positions: [1.524178, -2.100060, 1.864580, -1.345048, -1.575888, 1.528195]
+
+    home_zone_translation_min_m: [0.04, 0.04, 0.04]
+    home_zone_translation_max_m: [0.08, 0.08, 0.08]
+    home_zone_rotation_min_deg: [5.0, 5.0, 5.0]
+    home_zone_rotation_max_deg: [10.0, 10.0, 10.0]
+    home_zone_timeout_sec: 8.0
+    home_zone_rate_hz: 120.0
+    home_zone_max_linear_vel: 7.0
+    home_zone_max_angular_vel: 9.0
+    home_zone_linear_gain: 6.0
+    home_zone_angular_gain: 7.0
+    home_zone_position_tolerance_m: 0.01
+    home_zone_rotation_tolerance_deg: 6.0
+
+    teleop_controller: "forward_position_controller"
+    trajectory_controller: "scaled_joint_trajectory_controller"

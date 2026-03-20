@@ -1,16 +1,10 @@
-import os
-import signal
-import subprocess
-import sys
 from pathlib import Path
 from typing import List, Optional
 
 import numpy as np
 from PySide6.QtCore import QTimer, Slot
 from PySide6.QtWidgets import (
-    QApplication,
     QComboBox,
-    QDialog,
     QDoubleSpinBox,
     QFileDialog,
     QGridLayout,
@@ -27,14 +21,18 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from teleop_control_py.core import (
+    CameraRuntimeContext,
+    HardwareConflictError,
+    HardwareManager,
+    ProcessManager,
+)
 from teleop_control_py.gui_support import (
     build_camera_driver_command,
     build_robot_driver_command,
     build_teleop_command,
-    collector_camera_occupancy,
     detect_joystick_devices,
     get_local_ip,
-    hardware_conflicts_for_collector,
     load_gui_settings,
     save_gui_settings_overrides,
 )
@@ -68,7 +66,10 @@ class TeleopMainWindow(QMainWindow):
         self.setMinimumSize(1240, 860)
 
         self.gui_settings = load_gui_settings(__file__)
-        self.processes = {}
+        self.process_manager = ProcessManager(self)
+        self.process_manager.log_signal.connect(self.log)
+        self.process_manager.process_exited.connect(self._on_process_exit)
+        self.hardware_manager = HardwareManager()
         self.ros_worker = None
         self.inference_worker = None
         self.preview_window = None
@@ -78,10 +79,6 @@ class TeleopMainWindow(QMainWindow):
         self._latest_inference_wrist_bgr = None
         self.module_status_labels = {}
         self.hardware_status_labels = {}
-
-        self.process_watch_timer = QTimer(self)
-        self.process_watch_timer.timeout.connect(self._poll_subprocesses)
-        self.process_watch_timer.start(1000)
 
         self.status_refresh_timer = QTimer(self)
         self.status_refresh_timer.timeout.connect(self._refresh_runtime_status)
@@ -107,11 +104,10 @@ class TeleopMainWindow(QMainWindow):
         except Exception:
             pass
 
-        for key in list(self.processes.keys()):
-            try:
-                self.kill_subprocess(key)
-            except Exception:
-                pass
+        try:
+            self.process_manager.stop_all()
+        except Exception:
+            pass
 
     def setup_ui(self):
         central_widget = QWidget()
@@ -562,6 +558,10 @@ class TeleopMainWindow(QMainWindow):
             trajectory_topic="/scaled_joint_trajectory_controller/joint_trajectory",
             teleop_controller="forward_position_controller",
             trajectory_controller="scaled_joint_trajectory_controller",
+            home_zone_translation_min_m=self.gui_settings.home_zone_translation_min_m,
+            home_zone_translation_max_m=self.gui_settings.home_zone_translation_max_m,
+            home_zone_rotation_min_deg=self.gui_settings.home_zone_rotation_min_deg,
+            home_zone_rotation_max_deg=self.gui_settings.home_zone_rotation_max_deg,
         )
 
     def _sync_ros_worker_inference_control_config(self) -> None:
@@ -628,26 +628,7 @@ class TeleopMainWindow(QMainWindow):
     def refresh_mediapipe_topics(self, log_result: bool = True) -> None:
         current_value = self._selected_mediapipe_topic()
         topics = list(self._default_mediapipe_topics())
-
-        try:
-            result = subprocess.run(
-                ["ros2", "topic", "list", "-t"],
-                capture_output=True,
-                text=True,
-                timeout=2,
-            )
-            if result.returncode == 0:
-                for line in result.stdout.splitlines():
-                    line = line.strip()
-                    if not line:
-                        continue
-                    if "sensor_msgs/msg/Image" not in line:
-                        continue
-                    topic_name = line.split()[0]
-                    topics.append(topic_name)
-        except Exception as exc:
-            if log_result:
-                self.log(f"刷新手势识别输入话题失败: {exc}")
+        topics.extend(self.process_manager.list_ros_image_topics(log_errors=log_result))
 
         preferred = current_value or self.gui_settings.default_mediapipe_input_topic
         self._set_combo_items_unique(self.mediapipe_topic_combo, topics + [preferred], preferred)
@@ -660,10 +641,10 @@ class TeleopMainWindow(QMainWindow):
         return bool(self.preview_window is not None and self.preview_window.isVisible())
 
     def _collector_preview_api_should_run(self) -> bool:
-        return self._preview_window_visible() and self._process_running("data_collector")
+        return self._preview_window_visible() and self.process_manager.is_running("data_collector")
 
     def _inference_preview_should_render(self) -> bool:
-        return self._preview_window_visible() and self._inference_running() and not self._process_running("data_collector")
+        return self._preview_window_visible() and self._inference_running() and not self.process_manager.is_running("data_collector")
 
     def _selected_reverse_ip(self) -> str:
         configured_ip = self.gui_settings.default_reverse_ip.strip()
@@ -714,6 +695,37 @@ class TeleopMainWindow(QMainWindow):
     def _selected_inference_camera_source(self, combo: QComboBox, fallback: str) -> str:
         value = combo.currentData()
         return str(value).strip().lower() if value is not None else fallback
+
+    def _selected_collector_camera_sources(self) -> tuple[str, str]:
+        return (
+            self._selected_camera_source(self.global_camera_source_combo, self.gui_settings.default_global_camera_source),
+            self._selected_camera_source(self.wrist_camera_source_combo, self.gui_settings.default_wrist_camera_source),
+        )
+
+    def _selected_inference_camera_sources(self) -> tuple[str, str]:
+        return (
+            self._selected_inference_camera_source(
+                self.inference_global_camera_combo,
+                self.gui_settings.default_global_camera_source,
+            ),
+            self._selected_inference_camera_source(
+                self.inference_wrist_camera_combo,
+                self.gui_settings.default_wrist_camera_source,
+            ),
+        )
+
+    def _camera_runtime_context(self) -> CameraRuntimeContext:
+        collector_global_source, collector_wrist_source = self._selected_collector_camera_sources()
+        inference_global_source, inference_wrist_source = self._selected_inference_camera_sources()
+        return CameraRuntimeContext(
+            collector_running=self.process_manager.is_running("data_collector"),
+            collector_global_source=collector_global_source,
+            collector_wrist_source=collector_wrist_source,
+            inference_running=self._inference_running(),
+            inference_global_source=inference_global_source,
+            inference_wrist_source=inference_wrist_source,
+            active_camera_drivers=tuple(self.hardware_manager.active_camera_drivers(self.process_manager)),
+        )
 
     def _sync_inference_model_dir_tooltip(self) -> None:
         model_dir = self._selected_inference_model_dir()
@@ -864,27 +876,15 @@ class TeleopMainWindow(QMainWindow):
             return True
         return self.btn_execute_inference.isChecked()
 
-    def _inference_camera_occupancy(self) -> dict[str, bool]:
-        if not self._inference_running():
-            return {"realsense": False, "oakd": False}
-
-        global_source = self._selected_inference_camera_source(
-            self.inference_global_camera_combo,
-            self.gui_settings.default_global_camera_source,
-        )
-        wrist_source = self._selected_inference_camera_source(
-            self.inference_wrist_camera_combo,
-            self.gui_settings.default_wrist_camera_source,
-        )
-        selected_sources = {global_source, wrist_source}
-        return {
-            "realsense": "realsense" in selected_sources,
-            "oakd": "oakd" in selected_sources,
-        }
-
     def _ros_worker_required(self) -> bool:
         preview_running = bool(self.preview_window is not None and self.preview_window.isVisible())
-        return preview_running or self._process_running("data_collector") or self._inference_running()
+        return (
+            preview_running
+            or self.process_manager.is_running("data_collector")
+            or self.process_manager.is_running("robot_driver")
+            or self.process_manager.is_running("teleop")
+            or self._inference_running()
+        )
 
     def _stop_ros_worker_if_unused(self) -> None:
         if self.ros_worker is None or self._ros_worker_required():
@@ -978,41 +978,6 @@ class TeleopMainWindow(QMainWindow):
             return None
         return build_robot_state_vector(self.ros_worker.robot_state)
 
-    def _inference_camera_conflicts(self, global_source: str, wrist_source: str) -> List[str]:
-        conflicts: List[str] = []
-        if global_source == wrist_source:
-            conflicts.append("当前推理需要两路不同相机视角，请不要把全局相机和手部相机设置成同一源。")
-
-        selected_sources = {global_source, wrist_source}
-        if self._process_running("data_collector"):
-            occupancy = collector_camera_occupancy(
-                self._selected_camera_source(self.global_camera_source_combo, self.gui_settings.default_global_camera_source),
-                self._selected_camera_source(self.wrist_camera_source_combo, self.gui_settings.default_wrist_camera_source),
-            )
-            for source in sorted(selected_sources):
-                if occupancy.get(source, False):
-                    conflicts.append(f"采集节点正在占用 {source}")
-
-        for source in sorted(selected_sources):
-            if self._camera_driver_running(source):
-                conflicts.append(f"ROS2 相机驱动正在占用 {source}")
-
-        return conflicts
-
-    def _process_running(self, key: str) -> bool:
-        proc = self.processes.get(key)
-        return proc is not None and proc.poll() is None
-
-    def _camera_driver_running(self, camera_name: str) -> bool:
-        return self._process_running(f"camera_driver_{camera_name}")
-
-    def _active_camera_drivers(self) -> List[str]:
-        active = []
-        for camera_name in ("realsense", "oakd"):
-            if self._camera_driver_running(camera_name):
-                active.append(camera_name)
-        return active
-
     def _set_status_label(self, label: QLabel, text: str, color: str) -> None:
         label.setText(text)
         label.setStyleSheet(f"font-weight: bold; color: {color};")
@@ -1025,16 +990,12 @@ class TeleopMainWindow(QMainWindow):
     def _refresh_runtime_status(self) -> None:
         self.local_ip_label.setText(get_local_ip())
 
-        teleop_running = self._process_running("teleop")
-        robot_driver_running = teleop_running or self._process_running("robot_driver")
-        collector_running = self._process_running("data_collector")
+        teleop_running = self.process_manager.is_running("teleop")
+        robot_driver_running = teleop_running or self.process_manager.is_running("robot_driver")
+        collector_running = self.process_manager.is_running("data_collector")
         preview_running = bool(self.preview_window is not None and self.preview_window.isVisible())
-        active_camera_drivers = self._active_camera_drivers()
-        collector_usage = collector_camera_occupancy(
-            self._selected_camera_source(self.global_camera_source_combo, self.gui_settings.default_global_camera_source),
-            self._selected_camera_source(self.wrist_camera_source_combo, self.gui_settings.default_wrist_camera_source),
-        )
-        inference_usage = self._inference_camera_occupancy()
+        camera_context = self._camera_runtime_context()
+        active_camera_drivers = list(camera_context.active_camera_drivers)
 
         if not active_camera_drivers:
             self._set_status_label(self.module_status_labels["camera_driver"], "未启动", "#6c757d")
@@ -1044,7 +1005,7 @@ class TeleopMainWindow(QMainWindow):
 
         if teleop_running:
             self._set_status_label(self.module_status_labels["robot_driver"], "由遥操作系统托管", "#e67700")
-        elif self._process_running("robot_driver"):
+        elif self.process_manager.is_running("robot_driver"):
             self._set_status_label(self.module_status_labels["robot_driver"], "独立运行中", "#2b8a3e")
         else:
             self._set_status_label(self.module_status_labels["robot_driver"], "未启动", "#6c757d")
@@ -1055,32 +1016,18 @@ class TeleopMainWindow(QMainWindow):
         self._set_status_label(self.module_status_labels["inference"], inference_text, inference_color)
         self._set_status_label(self.module_status_labels["preview"], "打开" if preview_running else "关闭", "#2b8a3e" if preview_running else "#6c757d")
 
-        joy_devices = detect_joystick_devices()
-        if joy_devices:
-            joy_text = joy_devices[0]
-            if teleop_running and self._selected_input_type() == "joy":
-                joy_text = f"被遥操作占用: {joy_text}"
-            self._set_status_label(self.hardware_status_labels["joystick"], joy_text, "#2b8a3e")
-        else:
-            self._set_status_label(self.hardware_status_labels["joystick"], "未检测到", "#c92a2a")
+        joy_text, joy_color = self.hardware_manager.joystick_status(
+            detect_joystick_devices(),
+            teleop_running=teleop_running,
+            input_type=self._selected_input_type(),
+        )
+        self._set_status_label(self.hardware_status_labels["joystick"], joy_text, joy_color)
 
-        if self._inference_running() and inference_usage["realsense"]:
-            self._set_status_label(self.hardware_status_labels["realsense"], "推理模块占用", "#e67700")
-        elif collector_running and collector_usage["realsense"]:
-            self._set_status_label(self.hardware_status_labels["realsense"], "采集节点占用", "#e67700")
-        elif "realsense" in active_camera_drivers:
-            self._set_status_label(self.hardware_status_labels["realsense"], "ROS2 驱动占用", "#2b8a3e")
-        else:
-            self._set_status_label(self.hardware_status_labels["realsense"], "空闲", "#6c757d")
+        realsense_text, realsense_color = self.hardware_manager.camera_status("realsense", camera_context)
+        self._set_status_label(self.hardware_status_labels["realsense"], realsense_text, realsense_color)
 
-        if self._inference_running() and inference_usage["oakd"]:
-            self._set_status_label(self.hardware_status_labels["oakd"], "推理模块占用", "#e67700")
-        elif collector_running and collector_usage["oakd"]:
-            self._set_status_label(self.hardware_status_labels["oakd"], "采集节点占用", "#e67700")
-        elif "oakd" in active_camera_drivers:
-            self._set_status_label(self.hardware_status_labels["oakd"], "ROS2 驱动占用", "#2b8a3e")
-        else:
-            self._set_status_label(self.hardware_status_labels["oakd"], "空闲", "#6c757d")
+        oakd_text, oakd_color = self.hardware_manager.camera_status("oakd", camera_context)
+        self._set_status_label(self.hardware_status_labels["oakd"], oakd_text, oakd_color)
 
         if teleop_running:
             self._set_status_label(self.hardware_status_labels["robot"], "遥操作系统占用", "#2b8a3e")
@@ -1104,7 +1051,7 @@ class TeleopMainWindow(QMainWindow):
         self.btn_teleop.setToolTip("推理执行中时不能启动遥操作系统，避免双重控制。" if self._inference_execution_running() else "")
 
         selected_driver = self._selected_camera_driver()
-        if self._camera_driver_running(selected_driver):
+        if self.hardware_manager.camera_driver_running(self.process_manager, selected_driver):
             self._set_button_running(
                 self.btn_camera_driver,
                 True,
@@ -1160,32 +1107,27 @@ class TeleopMainWindow(QMainWindow):
         button.setText(stop_text if running else start_text)
         button.setStyleSheet(style if running else ("font-weight: bold;" if button is self.btn_teleop else ""))
 
-    def _handle_process_exit(self, key: str, returncode: int) -> None:
-        self.log(f"进程 {key} 已退出，返回码: {returncode}")
-        self.processes.pop(key, None)
-
+    @Slot(str, int)
+    def _on_process_exit(self, key: str, _returncode: int) -> None:
         if key in {"camera_driver_realsense", "camera_driver_oakd"}:
             self._refresh_runtime_status()
             return
         if key == "teleop":
             self._set_button_running(self.btn_teleop, False, "启动遥操作系统", "停止遥操作系统")
             self._set_button_running(self.btn_robot_driver, False, "启动机械臂驱动", "停止机械臂驱动")
+            self._stop_ros_worker_if_unused()
             self._refresh_runtime_status()
             return
         if key == "robot_driver":
             self._set_button_running(self.btn_robot_driver, False, "启动机械臂驱动", "停止机械臂驱动")
+            self._stop_ros_worker_if_unused()
+            self._refresh_runtime_status()
             return
         if key == "data_collector":
             self._set_button_running(self.btn_collector, False, "启动采集节点", "停止采集节点")
             self._sync_preview_pipeline()
             self._stop_ros_worker_if_unused()
-
-    def _poll_subprocesses(self) -> None:
-        for key, proc in list(self.processes.items()):
-            returncode = proc.poll()
-            if returncode is None:
-                continue
-            self._handle_process_exit(key, int(returncode))
+            self._refresh_runtime_status()
 
     def log(self, message):
         self.log_output.append(message)
@@ -1207,75 +1149,39 @@ class TeleopMainWindow(QMainWindow):
                 self.log(f"保存 HDF5 默认目录失败: {exc}")
             self.log(f"HDF5 保存目录已更新为: {normalized_dir}")
 
-    def run_subprocess(self, key, cmd_list):
-        self.log(f"执行指令: {' '.join(cmd_list)}")
-        try:
-            proc = subprocess.Popen(cmd_list, preexec_fn=os.setsid)
-            self.processes[key] = proc
-            return True
-        except Exception as exc:
-            self.log(f"启动 {key} 失败: {exc}")
-            return False
-
-    def kill_subprocess(self, key):
-        if key in self.processes:
-            proc = self.processes[key]
-            if proc.poll() is None:
-                self.log(f"正在终止 {key} (SIGINT)...")
-                try:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGINT)
-                    proc.wait(timeout=3)
-                    self.log(f"{key} 已正常关闭。")
-                except subprocess.TimeoutExpired:
-                    self.log(f"超时！正在强制终止 {key} (SIGKILL)...")
-                    try:
-                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                        proc.wait(timeout=2)
-                    except Exception as exc:
-                        self.log(f"强制终止失败: {exc}")
-                except Exception as exc:
-                    self.log(f"终止进程发生异常: {exc}")
-            del self.processes[key]
-
     def toggle_camera_driver(self, checked):
         selected_driver = self._selected_camera_driver()
         process_key = f"camera_driver_{selected_driver}"
 
         if checked:
-            inference_usage = self._inference_camera_occupancy()
-            if self._inference_running() and inference_usage.get(selected_driver, False):
-                QMessageBox.warning(self, "硬件占用冲突", f"推理模块正在占用 {selected_driver}")
+            try:
+                self.hardware_manager.check_camera_availability(
+                    requester="camera_driver",
+                    requested_sources=[selected_driver],
+                    context=self._camera_runtime_context(),
+                )
+            except HardwareConflictError as exc:
+                QMessageBox.warning(self, "硬件占用冲突", str(exc))
                 self._set_button_running(self.btn_camera_driver, False, "启动相机驱动", "停止所选驱动")
                 return
 
-            conflicts = hardware_conflicts_for_collector(
-                selected_driver,
-                self._process_running("data_collector"),
-                self._selected_camera_source(self.global_camera_source_combo, self.gui_settings.default_global_camera_source),
-                self._selected_camera_source(self.wrist_camera_source_combo, self.gui_settings.default_wrist_camera_source),
-            )
-            if conflicts:
-                QMessageBox.warning(self, "硬件占用冲突", "；".join(conflicts))
-                self._set_button_running(self.btn_camera_driver, False, "启动相机驱动", "停止所选驱动")
-                return
-
-            if self._camera_driver_running(selected_driver):
+            if self.hardware_manager.camera_driver_running(self.process_manager, selected_driver):
                 self.log(f"相机驱动 {selected_driver} 已经在运行。")
                 self._refresh_runtime_status()
                 return
 
-            if self.run_subprocess(process_key, build_camera_driver_command(selected_driver)):
+            if self.process_manager.run_subprocess(process_key, build_camera_driver_command(selected_driver)):
                 self._set_button_running(self.btn_camera_driver, True, "启动相机驱动", "停止所选驱动", "background-color: lightgreen;")
             else:
                 self._set_button_running(self.btn_camera_driver, False, "启动相机驱动", "停止所选驱动")
         else:
-            if self._camera_driver_running(selected_driver):
-                self.kill_subprocess(process_key)
+            if self.hardware_manager.camera_driver_running(self.process_manager, selected_driver):
+                self.process_manager.kill_subprocess(process_key)
             self._set_button_running(self.btn_camera_driver, False, "启动相机驱动", "停止所选驱动")
         self._refresh_runtime_status()
 
     def toggle_robot_driver(self, checked):
-        if self._process_running("teleop"):
+        if self.process_manager.is_running("teleop"):
             QMessageBox.information(self, "提示", "遥操作系统运行中时，机械臂驱动由 teleop 统一托管，不能单独操作。")
             self._set_button_running(self.btn_robot_driver, True, "启动机械臂驱动", "停止机械臂驱动", "background-color: #ffe8cc;")
             return
@@ -1287,13 +1193,15 @@ class TeleopMainWindow(QMainWindow):
                 self._selected_ur_type(),
                 self._selected_gripper_type(),
             )
-            if self.run_subprocess("robot_driver", cmd):
+            if self.process_manager.run_subprocess("robot_driver", cmd):
                 self._set_button_running(self.btn_robot_driver, True, "启动机械臂驱动", "停止机械臂驱动", "background-color: lightgreen;")
+                self.start_ros_worker()
             else:
                 self._set_button_running(self.btn_robot_driver, False, "启动机械臂驱动", "停止机械臂驱动")
         else:
-            self.kill_subprocess("robot_driver")
+            self.process_manager.kill_subprocess("robot_driver")
             self._set_button_running(self.btn_robot_driver, False, "启动机械臂驱动", "停止机械臂驱动")
+            self._stop_ros_worker_if_unused()
 
     def toggle_teleop(self, checked):
         if checked:
@@ -1309,9 +1217,9 @@ class TeleopMainWindow(QMainWindow):
             joy_profile = self._selected_joy_profile()
             mediapipe_topic = self._selected_mediapipe_topic()
 
-            if self._process_running("robot_driver"):
+            if self.process_manager.is_running("robot_driver"):
                 self.log("检测到机械臂 ROS2 驱动已独立启动，启动遥操作前先停止独立驱动实例。")
-                self.kill_subprocess("robot_driver")
+                self.process_manager.kill_subprocess("robot_driver")
 
             self.log(
                 "准备启动遥操作系统: "
@@ -1327,8 +1235,9 @@ class TeleopMainWindow(QMainWindow):
                 joy_profile=joy_profile,
                 mediapipe_input_topic=mediapipe_topic,
             )
-            if self.run_subprocess("teleop", cmd):
+            if self.process_manager.run_subprocess("teleop", cmd):
                 self._set_button_running(self.btn_teleop, True, "启动遥操作系统", "停止遥操作系统", "background-color: lightgreen; font-weight: bold;")
+                self.start_ros_worker()
             else:
                 self._set_button_running(self.btn_teleop, False, "启动遥操作系统", "停止遥操作系统")
                 return
@@ -1338,7 +1247,7 @@ class TeleopMainWindow(QMainWindow):
 
             QMessageBox.information(self, "操作提示", "遥操作系统已启动！\n\n请不要忘记按示教器的【程序运行播放键】。")
         else:
-            self.kill_subprocess("teleop")
+            self.process_manager.kill_subprocess("teleop")
             self._set_button_running(self.btn_teleop, False, "启动遥操作系统", "停止遥操作系统")
             self._set_button_running(self.btn_robot_driver, False, "启动机械臂驱动", "停止机械臂驱动")
             self._refresh_runtime_status()
@@ -1347,27 +1256,21 @@ class TeleopMainWindow(QMainWindow):
         if checked:
             out_path = self._selected_record_output_path()
             collector_ee_type = self._selected_collector_end_effector_type()
-            global_camera_source = self._selected_camera_source(self.global_camera_source_combo, "realsense")
-            wrist_camera_source = self._selected_camera_source(self.wrist_camera_source_combo, self.gui_settings.default_wrist_camera_source)
+            global_camera_source, wrist_camera_source = self._selected_collector_camera_sources()
             try:
                 Path(out_path).parent.mkdir(parents=True, exist_ok=True)
             except Exception as exc:
                 QMessageBox.warning(self, "输出路径无效", f"无法创建 HDF5 输出目录:\n{exc}")
                 self._set_button_running(self.btn_collector, False, "启动采集节点", "停止采集节点")
                 return
-            active_camera_drivers = self._active_camera_drivers()
-            conflicts: List[str] = []
-            for active_camera_driver in active_camera_drivers:
-                conflicts.extend(
-                    hardware_conflicts_for_collector(active_camera_driver, True, global_camera_source, wrist_camera_source)
+            try:
+                self.hardware_manager.check_camera_availability(
+                    requester="collector",
+                    requested_sources=[global_camera_source, wrist_camera_source],
+                    context=self._camera_runtime_context(),
                 )
-            inference_usage = self._inference_camera_occupancy()
-            if self._inference_running():
-                for source in sorted({global_camera_source, wrist_camera_source}):
-                    if inference_usage.get(source, False):
-                        conflicts.append(f"推理模块正在占用 {source}")
-            if conflicts:
-                QMessageBox.warning(self, "相机占用冲突", "当前采集将直接占用相机 SDK，不能与同一硬件的 ROS2 驱动同时运行。\n\n" + "；".join(conflicts))
+            except HardwareConflictError as exc:
+                QMessageBox.warning(self, "相机占用冲突", "当前采集将直接占用相机 SDK，不能与同一硬件的 ROS2 驱动同时运行。\n\n" + str(exc))
                 self._set_button_running(self.btn_collector, False, "启动采集节点", "停止采集节点")
                 return
 
@@ -1378,15 +1281,12 @@ class TeleopMainWindow(QMainWindow):
             )
 
             yaml_args = []
-            try:
-                result = subprocess.run(["ros2", "pkg", "prefix", "teleop_control_py"], capture_output=True, text=True)
-                if result.returncode == 0:
-                    pkg_path = result.stdout.strip()
-                    yaml_path = Path(pkg_path) / "share/teleop_control_py/config/data_collector_params.yaml"
-                    if yaml_path.exists():
-                        yaml_args = ["--params-file", str(yaml_path)]
-            except Exception:
-                pass
+            yaml_path = self.process_manager.find_package_share_file(
+                "teleop_control_py",
+                "config/data_collector_params.yaml",
+            )
+            if yaml_path is not None:
+                yaml_args = ["--params-file", str(yaml_path)]
 
             cmd = ["ros2", "run", "teleop_control_py", "data_collector_node", "--ros-args"]
             if yaml_args:
@@ -1396,25 +1296,9 @@ class TeleopMainWindow(QMainWindow):
                 "-p", f"global_camera_source:={global_camera_source}",
                 "-p", f"wrist_camera_source:={wrist_camera_source}",
                 "-p", f"end_effector_type:={collector_ee_type}",
-                "-p", f"ur_type:={self._selected_ur_type()}",
             ])
-            if len(self.gui_settings.home_joint_positions) == 6:
-                joint_values = ", ".join(f"{float(value):.6f}" for value in self.gui_settings.home_joint_positions)
-                cmd.extend(["-p", f"home_joint_positions:=[{joint_values}]"])
-            if len(self.gui_settings.home_zone_translation_min_m) == 3:
-                values = ", ".join(f"{float(value):.6f}" for value in self.gui_settings.home_zone_translation_min_m)
-                cmd.extend(["-p", f"home_zone_translation_min_m:=[{values}]"])
-            if len(self.gui_settings.home_zone_translation_max_m) == 3:
-                values = ", ".join(f"{float(value):.6f}" for value in self.gui_settings.home_zone_translation_max_m)
-                cmd.extend(["-p", f"home_zone_translation_max_m:=[{values}]"])
-            if len(self.gui_settings.home_zone_rotation_min_deg) == 3:
-                values = ", ".join(f"{float(value):.6f}" for value in self.gui_settings.home_zone_rotation_min_deg)
-                cmd.extend(["-p", f"home_zone_rotation_min_deg:=[{values}]"])
-            if len(self.gui_settings.home_zone_rotation_max_deg) == 3:
-                values = ", ".join(f"{float(value):.6f}" for value in self.gui_settings.home_zone_rotation_max_deg)
-                cmd.extend(["-p", f"home_zone_rotation_max_deg:=[{values}]"])
 
-            if not self.run_subprocess("data_collector", cmd):
+            if not self.process_manager.run_subprocess("data_collector", cmd):
                 self._set_button_running(self.btn_collector, False, "启动采集节点", "停止采集节点")
                 return
 
@@ -1422,7 +1306,7 @@ class TeleopMainWindow(QMainWindow):
             self.start_ros_worker()
             self._sync_preview_pipeline()
         else:
-            self.kill_subprocess("data_collector")
+            self.process_manager.kill_subprocess("data_collector")
             self._set_button_running(self.btn_collector, False, "启动采集节点", "停止采集节点")
             self._stop_ros_worker_if_unused()
 
@@ -1490,17 +1374,16 @@ class TeleopMainWindow(QMainWindow):
                 self._set_inference_button_running(False)
                 return
 
-            global_source = self._selected_inference_camera_source(
-                self.inference_global_camera_combo,
-                self.gui_settings.default_global_camera_source,
-            )
-            wrist_source = self._selected_inference_camera_source(
-                self.inference_wrist_camera_combo,
-                self.gui_settings.default_wrist_camera_source,
-            )
-            conflicts = self._inference_camera_conflicts(global_source, wrist_source)
-            if conflicts:
-                QMessageBox.warning(self, "相机占用冲突", "；".join(conflicts))
+            global_source, wrist_source = self._selected_inference_camera_sources()
+            try:
+                self.hardware_manager.check_camera_availability(
+                    requester="inference",
+                    requested_sources=[global_source, wrist_source],
+                    context=self._camera_runtime_context(),
+                    require_distinct_views=True,
+                )
+            except HardwareConflictError as exc:
+                QMessageBox.warning(self, "相机占用冲突", str(exc))
                 self._set_inference_button_running(False)
                 return
 
@@ -1546,11 +1429,11 @@ class TeleopMainWindow(QMainWindow):
                 QMessageBox.warning(self, "推理未运行", "请先启动推理，再开始执行任务。")
                 self._set_inference_execute_button_running(False)
                 return
-            if self._process_running("teleop"):
+            if self.process_manager.is_running("teleop"):
                 QMessageBox.warning(self, "控制冲突", "遥操作系统正在输出控制命令，请先停止遥操作系统。")
                 self._set_inference_execute_button_running(False)
                 return
-            if not self._process_running("robot_driver"):
+            if not self.process_manager.is_running("robot_driver"):
                 QMessageBox.warning(self, "机械臂未就绪", "请先启动机械臂驱动，再执行推理任务。")
                 self._set_inference_execute_button_running(False)
                 return
@@ -1679,26 +1562,28 @@ class TeleopMainWindow(QMainWindow):
             self.ros_worker.call_stop_record()
 
     def go_home(self):
-        if self.ros_worker:
+        if self.ros_worker is None:
+            self.start_ros_worker()
+            self.log("已启动独立 ROS 监听器，用于执行 Home / Home Zone 控制。")
+        if self.ros_worker is not None:
             if self._inference_execution_running():
                 self._set_inference_execute_button_running(False)
                 self._set_inference_execute_status("未使能", "#6c757d")
                 self.btn_inference_estop.setEnabled(self._inference_running())
                 self._refresh_runtime_status()
             self.ros_worker.call_go_home()
-        else:
-            QMessageBox.warning(self, "警告", "请先启动推理或采集节点，以建立 ROS 控制链后再执行 Home。")
 
     def go_home_zone(self):
-        if self.ros_worker:
+        if self.ros_worker is None:
+            self.start_ros_worker()
+            self.log("已启动独立 ROS 监听器，用于执行 Home / Home Zone 控制。")
+        if self.ros_worker is not None:
             if self._inference_execution_running():
                 self._set_inference_execute_button_running(False)
                 self._set_inference_execute_status("未使能", "#6c757d")
                 self.btn_inference_estop.setEnabled(self._inference_running())
                 self._refresh_runtime_status()
             self.ros_worker.call_go_home_zone()
-        else:
-            QMessageBox.warning(self, "警告", "请先启动采集节点，再执行 Home Zone。")
 
     def set_home_from_current(self):
         if self.ros_worker:
@@ -1724,7 +1609,7 @@ class TeleopMainWindow(QMainWindow):
             if saved:
                 self.log(f"已持久化 Home 点到 GUI 配置: {saved}\nHome joints: {joints_str}")
         else:
-            QMessageBox.warning(self, "警告", "请先启动采集节点并接收实时关节数据，再设置 Home 点。")
+            QMessageBox.warning(self, "警告", "请先启动机械臂驱动、遥操作系统或预览窗口，并接收实时关节数据，再设置 Home 点。")
 
     @Slot(str)
     def update_demo_status(self, demo_name):

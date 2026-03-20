@@ -67,7 +67,6 @@ data_collector:
     preview_api_host: "127.0.0.1"
     preview_api_port: 8765
     preview_api_jpeg_quality: 80
-    ur_type: "ur5"
 
     # 节点内部会强制使用 224。
     obs_image_size: 224
@@ -81,31 +80,7 @@ data_collector:
     writer_flush_every_n: 200
 
     # ==========================================================
-    # 7) Go Home 与控制器切换
-    # ==========================================================
-    home_joint_trajectory_topic: "/scaled_joint_trajectory_controller/joint_trajectory"
-    home_duration_sec: 3.0
-    # 单位 rad，顺序与 joint_names 一致。
-    home_joint_positions: [1.524178, -2.100060, 1.864580, -1.345048, -1.575888, 1.528195]
-    # Home Zone: 先回 Home 点，再以当前实际末端位姿为中心做随机偏移。
-    # 绝对值范围 [min, max] 内随机采样，并带随机正负号。
-    home_zone_translation_min_m: [0.04, 0.04, 0.04]
-    home_zone_translation_max_m: [0.08, 0.08, 0.08]
-    home_zone_rotation_min_deg: [5.0, 5.0, 5.0]
-    home_zone_rotation_max_deg: [10.0, 10.0, 10.0]
-    home_zone_timeout_sec: 8.0
-    home_zone_rate_hz: 120.0
-    home_zone_max_linear_vel: 7.0
-    home_zone_max_angular_vel: 9.0
-    home_zone_linear_gain: 6.0
-    home_zone_angular_gain: 7.0
-    home_zone_position_tolerance_m: 0.01
-    home_zone_rotation_tolerance_deg: 6.0
-    teleop_controller: "forward_position_controller"
-    trajectory_controller: "scaled_joint_trajectory_controller"
-
-    # ==========================================================
-    # 8) 可选键盘控制
+    # 7) 可选键盘控制
     # ==========================================================
     # r: 开始录制，s: 停止录制，q: 退出；需要回车确认。
     enable_keyboard: false
