@@ -24,8 +24,6 @@ class GuiSettings:
     default_joy_profile: str
     joy_profiles: List[str]
     default_mediapipe_input_topic: str
-    default_preview_global_topic: str
-    default_preview_wrist_topic: str
     camera_driver_options: List[str]
     default_camera_driver: str
     default_global_camera_source: str
@@ -111,8 +109,6 @@ def load_gui_settings(current_file: str | Path) -> GuiSettings:
         default_joy_profile=str(raw.get("default_joy_profile", "auto")),
         joy_profiles=[str(v) for v in raw.get("joy_profiles", ["auto", "xbox", "ps5", "generic"])],
         default_mediapipe_input_topic=str(raw.get("default_mediapipe_input_topic", "/camera/camera/color/image_raw")),
-        default_preview_global_topic=str(raw.get("default_preview_global_topic", "/data_collector/preview/global/image_raw")),
-        default_preview_wrist_topic=str(raw.get("default_preview_wrist_topic", "/data_collector/preview/wrist/image_raw")),
         camera_driver_options=[str(v) for v in raw.get("camera_driver_options", ["realsense", "oakd"])],
         default_camera_driver=str(raw.get("default_camera_driver", "realsense")),
         default_global_camera_source=str(raw.get("default_global_camera_source", "realsense")),
@@ -231,7 +227,7 @@ def get_local_ip() -> str:
 def build_camera_driver_command(camera_driver: str) -> List[str]:
     key = camera_driver.strip().lower()
     if key == "realsense":
-        return ["ros2", "launch", "realsense2_camera", "rs_launch.py"]
+        return ["ros2", "launch", "realsense2_camera", "rs_launch.py", "align_depth.enable:=true"]
     if key == "oakd":
         return ["ros2", "launch", "depthai_examples", "rgb_stereo_node.launch.py"]
     raise ValueError(f"Unsupported camera driver: {camera_driver}")

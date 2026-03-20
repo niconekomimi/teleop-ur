@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 from typing import Any, Dict, Optional
 
 from ament_index_python.packages import get_package_share_directory
@@ -21,13 +22,50 @@ from launch_ros.actions import Node
 from launch_ros.actions import SetRemap
 
 
+def _python_supports_modules(candidate: str, modules: tuple[str, ...]) -> bool:
+	try:
+		result = subprocess.run(
+			[
+				candidate,
+				"-c",
+				(
+					"import importlib.util, sys; "
+					"mods = sys.argv[1:]; "
+					"missing = [m for m in mods if importlib.util.find_spec(m) is None]; "
+					"raise SystemExit(0 if not missing else 1)"
+				),
+				*modules,
+			],
+			stdout=subprocess.DEVNULL,
+			stderr=subprocess.DEVNULL,
+			timeout=2.0,
+			check=False,
+		)
+	except Exception:
+		return False
+	return result.returncode == 0
+
+
 def _default_python_executable() -> str:
+	candidates = []
 	for prefix_var in ("VIRTUAL_ENV", "CONDA_PREFIX"):
 		prefix = os.environ.get(prefix_var)
 		if not prefix:
 			continue
 		candidate = os.path.join(prefix, "bin", "python3")
 		if os.path.exists(candidate):
+			candidates.append(candidate)
+	home_candidate = os.path.expanduser("~/clds/bin/python3")
+	if os.path.exists(home_candidate):
+		candidates.append(home_candidate)
+	candidates.append("python3")
+
+	for candidate in candidates:
+		if _python_supports_modules(candidate, ("mediapipe", "pynput")):
+			return candidate
+
+	for candidate in candidates:
+		if candidate == "python3" or os.path.exists(candidate):
 			return candidate
 	return "python3"
 
@@ -143,6 +181,7 @@ def _maybe_include_end_effector_driver(context, *args, **kwargs):
 					"fake_hardware": LaunchConfiguration("robotiq_fake_hardware"),
 					"config_file": LaunchConfiguration("robotiq_config_file"),
 					"rviz2": LaunchConfiguration("robotiq_rviz2"),
+					"log_level": LaunchConfiguration("robotiq_log_level"),
 				}.items(),
 			)
 		)
@@ -254,9 +293,12 @@ def _maybe_include_realsense(context, *args, **kwargs):
 	actions.append(
 		IncludeLaunchDescription(
 			PythonLaunchDescriptionSource(realsense_launch_path),
+			launch_arguments={
+				"align_depth.enable": "true",
+			}.items(),
 		)
 	)
-	actions.append(LogInfo(msg="[control_system] Included realsense2_camera/rs_launch.py"))
+	actions.append(LogInfo(msg="[control_system] Included realsense2_camera/rs_launch.py with align_depth.enable=true"))
 	return actions
 
 
@@ -373,6 +415,11 @@ def generate_launch_description() -> LaunchDescription:
 		default_value="False",
 		description="Launch RViz2 for Robotiq visualization",
 	)
+	robotiq_log_level_arg = DeclareLaunchArgument(
+		"robotiq_log_level",
+		default_value="warn",
+		description="ROS log level for robotiq_2f_gripper_node",
+	)
 
 	ur_type_arg = DeclareLaunchArgument(
 		"ur_type",
@@ -477,6 +524,7 @@ def generate_launch_description() -> LaunchDescription:
 			robotiq_fake_hw_arg,
 			robotiq_config_file_arg,
 			robotiq_rviz2_arg,
+			robotiq_log_level_arg,
 			ur_type_arg,
 			robot_ip_arg,
 			reverse_ip_arg,

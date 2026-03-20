@@ -12,8 +12,6 @@ teleop_gui:
     - ps5
     - generic
     default_mediapipe_input_topic: /camera/camera/color/image_raw
-    default_preview_global_topic: /data_collector/preview/global/image_raw
-    default_preview_wrist_topic: /data_collector/preview/wrist/image_raw
     camera_driver_options:
     - realsense
     - oakd

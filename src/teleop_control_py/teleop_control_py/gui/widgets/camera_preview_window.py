@@ -29,6 +29,10 @@ class CameraPreviewWindow(QDialog):
         top_layout.addWidget(self.crop_cb)
         top_layout.addStretch()
 
+        self.lbl_preview_source = QLabel("预览源: 无活动图像源")
+        self.lbl_preview_source.setStyleSheet("font-weight: bold; color: #555;")
+        top_layout.addWidget(self.lbl_preview_source)
+
         self.lbl_record_status = QLabel("状态: 未录制 | 时长: 00:00 | 已录制帧数: 0 | 实时录制帧率: 0.00 Hz")
         self.lbl_record_status.setStyleSheet("font-weight: bold; font-size: 14px; color: blue;")
         top_layout.addWidget(self.lbl_record_status)
@@ -112,6 +116,16 @@ class CameraPreviewWindow(QDialog):
     @Slot(str)
     def update_robot_state_str(self, text):
         self.text_robot_state.setText(text)
+
+    def set_preview_source(self, source_text: str) -> None:
+        text = str(source_text).strip() or "未知"
+        self.lbl_preview_source.setText(f"预览源: {text}")
+
+    def clear_images(self) -> None:
+        self.global_label.clear()
+        self.wrist_label.clear()
+        self.global_label.setText("无画面")
+        self.wrist_label.setText("无画面")
 
     @Slot(int, str, float)
     def update_record_stats(self, frames, time_str, realtime_fps):

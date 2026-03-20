@@ -7,7 +7,6 @@ import numpy as np
 import rclpy
 from builtin_interfaces.msg import Duration as DurationMsg
 from controller_manager_msgs.srv import SwitchController
-from cv_bridge import CvBridge
 from geometry_msgs.msg import PoseStamped, Twist
 from geometry_msgs.msg import TwistStamped
 from PySide6.QtCore import QThread, Signal
@@ -15,7 +14,7 @@ from rcl_interfaces.srv import SetParameters
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from rclpy.qos import qos_profile_sensor_data
-from sensor_msgs.msg import Image, JointState
+from sensor_msgs.msg import JointState
 from std_msgs.msg import Float32, Float32MultiArray
 from std_srvs.srv import Trigger
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
@@ -25,39 +24,19 @@ from ..servo_pose_follower import ServoPoseFollower
 
 
 class ROS2Worker(QThread):
-    global_image_signal = Signal(np.ndarray)
-    wrist_image_signal = Signal(np.ndarray)
     robot_state_str_signal = Signal(str)
     record_stats_signal = Signal(int, str, float)
     log_signal = Signal(str)
     demo_status_signal = Signal(str)
 
-    def __init__(self, global_topic, wrist_topic, pose_topic, gripper_topic, action_topic):
+    def __init__(self, pose_topic, gripper_topic, action_topic):
         super().__init__()
-        self.global_topic = global_topic
-        self.wrist_topic = wrist_topic
-        self.inference_preview_global_topic = "/model_inference/preview/global/image_raw"
-        self.inference_preview_wrist_topic = "/model_inference/preview/wrist/image_raw"
         self.pose_topic = str(pose_topic).strip()
         self.gripper_topic = str(gripper_topic).strip()
         self.action_topic = str(action_topic).strip()
-        self._global_sub_topic = None
-        self._wrist_sub_topic = None
         self.node = None
-        self.bridge = CvBridge()
         self._is_running = True
 
-        self.global_sub = None
-        self.wrist_sub = None
-        self.enable_image_processing = False
-        self._inference_preview_enabled = False
-        self._inference_preview_lock = threading.Lock()
-        self._inference_preview_global_bgr = None
-        self._inference_preview_wrist_bgr = None
-        self._inference_preview_seq = 0
-        self._inference_preview_last_published_seq = -1
-        self._inference_preview_global_pub = None
-        self._inference_preview_wrist_pub = None
         self._home_joint_positions = [1.524178, -2.100060, 1.864580, -1.345048, -1.575888, 1.528195]
         self._home_duration_sec = 3.0
         self._home_joint_names = [
@@ -107,45 +86,6 @@ class ROS2Worker(QThread):
             "action_linear": [0.0, 0.0, 0.0],
             "action_angular": [0.0, 0.0, 0.0],
         }
-
-    def _emit_image_topics_log(self) -> None:
-        self.log_signal.emit(
-            f"ROS 2 图像监听话题已切换:\n - 全局: {self.global_topic} (预览打开时才订阅)"
-            f"\n - 手部: {self.wrist_topic} (预览打开时才订阅)"
-        )
-
-    def set_image_topics(self, global_topic: str, wrist_topic: str) -> None:
-        new_global_topic = str(global_topic).strip()
-        new_wrist_topic = str(wrist_topic).strip()
-        changed = (new_global_topic != self.global_topic) or (new_wrist_topic != self.wrist_topic)
-
-        self.global_topic = new_global_topic
-        self.wrist_topic = new_wrist_topic
-        if not changed:
-            return
-
-        if self.node is not None:
-            self._destroy_image_subscriptions()
-        self._emit_image_topics_log()
-
-    def set_inference_preview_topics(self, global_topic: str, wrist_topic: str) -> None:
-        self.inference_preview_global_topic = str(global_topic).strip()
-        self.inference_preview_wrist_topic = str(wrist_topic).strip()
-
-    def set_inference_preview_enabled(self, enabled: bool) -> None:
-        self._inference_preview_enabled = bool(enabled)
-
-    def update_inference_preview_frames(self, global_bgr, wrist_bgr) -> None:
-        with self._inference_preview_lock:
-            self._inference_preview_global_bgr = None if global_bgr is None else np.ascontiguousarray(global_bgr).copy()
-            self._inference_preview_wrist_bgr = None if wrist_bgr is None else np.ascontiguousarray(wrist_bgr).copy()
-            self._inference_preview_seq += 1
-
-    def clear_inference_preview_frames(self) -> None:
-        with self._inference_preview_lock:
-            self._inference_preview_global_bgr = None
-            self._inference_preview_wrist_bgr = None
-            self._inference_preview_seq += 1
 
     def set_inference_control_config(self, gripper_type: str, control_hz: float = 50.0) -> None:
         normalized = str(gripper_type).strip().lower()
@@ -246,10 +186,16 @@ class ROS2Worker(QThread):
         self._set_or_declare_parameter("startup_retry_period_sec", 1.0)
         self._set_or_declare_parameter("gripper_cmd_topic", self.gripper_topic)
         self._set_or_declare_parameter("gripper_command_delta", 0.01)
-        self._set_or_declare_parameter("robotiq_command_interface", "confidence_topic")
+        self._set_or_declare_parameter("gripper_quantization_levels", 10)
+        self._set_or_declare_parameter("robotiq_command_interface", "position_action")
         self._set_or_declare_parameter("robotiq_confidence_topic", "/robotiq_2f_gripper/confidence_command")
         self._set_or_declare_parameter("robotiq_binary_topic", "/robotiq_2f_gripper/binary_command")
+        self._set_or_declare_parameter("robotiq_action_name", "/robotiq_2f_gripper_action")
         self._set_or_declare_parameter("robotiq_binary_threshold", 0.5)
+        self._set_or_declare_parameter("robotiq_open_ratio", 0.9)
+        self._set_or_declare_parameter("robotiq_max_open_position_m", 0.142)
+        self._set_or_declare_parameter("robotiq_target_speed", 1.0)
+        self._set_or_declare_parameter("robotiq_target_force", 0.5)
         self._set_or_declare_parameter("qbsofthand_service_name", "/qbsofthand_control_node/set_closure")
         self._set_or_declare_parameter("qbsofthand_duration_sec", 0.3)
         self._set_or_declare_parameter("qbsofthand_speed_ratio", 1.0)
@@ -319,110 +265,10 @@ class ROS2Worker(QThread):
         self._arm_ctrl.send_twist(twist)
         self._gripper_ctrl.set_gripper(self._binary_gripper_command(float(action[6])))
 
-    def _publish_inference_preview_frames(self):
-        if not self._inference_preview_enabled:
-            return
-        if self._inference_preview_global_pub is None or self._inference_preview_wrist_pub is None:
-            return
-
-        with self._inference_preview_lock:
-            seq = self._inference_preview_seq
-            if seq == self._inference_preview_last_published_seq:
-                return
-            global_bgr = None if self._inference_preview_global_bgr is None else self._inference_preview_global_bgr.copy()
-            wrist_bgr = None if self._inference_preview_wrist_bgr is None else self._inference_preview_wrist_bgr.copy()
-
-        if global_bgr is None or wrist_bgr is None:
-            return
-
-        stamp = self.node.get_clock().now().to_msg()
-        try:
-            global_msg = self.bridge.cv2_to_imgmsg(global_bgr, encoding="bgr8")
-            global_msg.header.stamp = stamp
-            global_msg.header.frame_id = "model_inference_global_preview"
-            self._inference_preview_global_pub.publish(global_msg)
-        except Exception:
-            return
-
-        try:
-            wrist_msg = self.bridge.cv2_to_imgmsg(wrist_bgr, encoding="bgr8")
-            wrist_msg.header.stamp = stamp
-            wrist_msg.header.frame_id = "model_inference_wrist_preview"
-            self._inference_preview_wrist_pub.publish(wrist_msg)
-        except Exception:
-            return
-
-        self._inference_preview_last_published_seq = seq
-
-    def _ensure_image_subscriptions(self):
-        if self.node is None:
-            return
-        if self.global_sub is not None and self._global_sub_topic != self.global_topic:
-            try:
-                self.node.destroy_subscription(self.global_sub)
-            except Exception:
-                pass
-            self.global_sub = None
-            self._global_sub_topic = None
-        if self.wrist_sub is not None and self._wrist_sub_topic != self.wrist_topic:
-            try:
-                self.node.destroy_subscription(self.wrist_sub)
-            except Exception:
-                pass
-            self.wrist_sub = None
-            self._wrist_sub_topic = None
-
-        if self.global_sub is None:
-            self.global_sub = self.node.create_subscription(
-                Image, self.global_topic, self.global_callback, qos_profile_sensor_data
-            )
-            self._global_sub_topic = self.global_topic
-        if self.wrist_sub is None:
-            self.wrist_sub = self.node.create_subscription(
-                Image, self.wrist_topic, self.wrist_callback, qos_profile_sensor_data
-            )
-            self._wrist_sub_topic = self.wrist_topic
-
-    def _destroy_image_subscriptions(self):
-        if self.node is None:
-            return
-        if self.global_sub is not None:
-            try:
-                self.node.destroy_subscription(self.global_sub)
-            except Exception:
-                pass
-            self.global_sub = None
-            self._global_sub_topic = None
-        if self.wrist_sub is not None:
-            try:
-                self.node.destroy_subscription(self.wrist_sub)
-            except Exception:
-                pass
-            self.wrist_sub = None
-            self._wrist_sub_topic = None
-
-    def _image_subs_timer_callback(self):
-        if self.enable_image_processing:
-            self._ensure_image_subscriptions()
-        else:
-            self._destroy_image_subscriptions()
-
     def run(self):
         rclpy.init()
         self.node = Node("teleop_gui_node")
         self._apply_inference_control_parameters()
-        self.image_subs_timer = self.node.create_timer(0.2, self._image_subs_timer_callback)
-        self._inference_preview_global_pub = self.node.create_publisher(
-            Image,
-            self.inference_preview_global_topic,
-            qos_profile_sensor_data,
-        )
-        self._inference_preview_wrist_pub = self.node.create_publisher(
-            Image,
-            self.inference_preview_wrist_topic,
-            qos_profile_sensor_data,
-        )
-        self.inference_preview_timer = self.node.create_timer(1.0 / 30.0, self._publish_inference_preview_frames)
         self._home_pub = self.node.create_publisher(JointTrajectory, self._home_joint_trajectory_topic, 10)
         self._switch_ctrl_client = self.node.create_client(
             SwitchController,
@@ -453,36 +299,11 @@ class ROS2Worker(QThread):
 
         self.stats_timer = self.node.create_timer(0.1, self.stats_timer_callback)
 
-        self._emit_image_topics_log()
-
         while rclpy.ok() and self._is_running:
             rclpy.spin_once(self.node, timeout_sec=0.05)
 
-        try:
-            self._destroy_image_subscriptions()
-        except Exception:
-            pass
-
         self.node.destroy_node()
         rclpy.shutdown()
-
-    def global_callback(self, msg):
-        try:
-            if not self.enable_image_processing:
-                return
-            cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
-            self.global_image_signal.emit(cv_image)
-        except Exception:
-            pass
-
-    def wrist_callback(self, msg):
-        try:
-            if not self.enable_image_processing:
-                return
-            cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
-            self.wrist_image_signal.emit(cv_image)
-        except Exception:
-            pass
 
     def joint_callback(self, msg):
         target_joints = [

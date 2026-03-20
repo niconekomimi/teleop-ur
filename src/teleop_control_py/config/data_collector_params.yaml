@@ -51,18 +51,22 @@ data_collector:
     # 5) 时间戳有效性
     # ==========================================================
     pose_max_age_sec: 0.05
+    joint_max_age_sec: 0.20
     command_max_age_sec: 0.2
     gripper_max_age_sec: 0.5
+    image_max_age_sec: 0.10
+    camera_pair_max_skew_sec: 0.15
     # 位姿时间戳为零时，使用当前采样时刻作为参考。
     pose_stamp_zero_is_ref: true
 
     # ==========================================================
     # 6) 图像处理与写盘
     # ==========================================================
-    preview_enabled: true
     preview_fps: 30.0
-    preview_global_topic: "/data_collector/preview/global/image_raw"
-    preview_wrist_topic: "/data_collector/preview/wrist/image_raw"
+    preview_api_enabled: true
+    preview_api_host: "127.0.0.1"
+    preview_api_port: 8765
+    preview_api_jpeg_quality: 80
     ur_type: "ur5"
 
     # 节点内部会强制使用 224。

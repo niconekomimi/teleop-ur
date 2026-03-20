@@ -30,25 +30,35 @@ class TeleopControlNode(Node):
         self._gripper_type = str(self.get_parameter("gripper_type").value).strip().lower()
         self._control_hz = max(1.0, float(self.get_parameter("control_hz").value))
 
+        linear_vel_param = "max_linear_vel"
+        angular_vel_param = "max_angular_vel"
+        linear_accel_param = "max_linear_accel"
+        angular_accel_param = "max_angular_accel"
+        if self._input_type == "mediapipe":
+            linear_vel_param = "mediapipe_max_linear_vel"
+            angular_vel_param = "mediapipe_max_angular_vel"
+            linear_accel_param = "mediapipe_max_linear_accel"
+            angular_accel_param = "mediapipe_max_angular_accel"
+
         self._max_velocity = np.array(
             [
-                float(self.get_parameter("max_linear_vel").value),
-                float(self.get_parameter("max_linear_vel").value),
-                float(self.get_parameter("max_linear_vel").value),
-                float(self.get_parameter("max_angular_vel").value),
-                float(self.get_parameter("max_angular_vel").value),
-                float(self.get_parameter("max_angular_vel").value),
+                float(self.get_parameter(linear_vel_param).value),
+                float(self.get_parameter(linear_vel_param).value),
+                float(self.get_parameter(linear_vel_param).value),
+                float(self.get_parameter(angular_vel_param).value),
+                float(self.get_parameter(angular_vel_param).value),
+                float(self.get_parameter(angular_vel_param).value),
             ],
             dtype=np.float64,
         )
         self._max_acceleration = np.array(
             [
-                float(self.get_parameter("max_linear_accel").value),
-                float(self.get_parameter("max_linear_accel").value),
-                float(self.get_parameter("max_linear_accel").value),
-                float(self.get_parameter("max_angular_accel").value),
-                float(self.get_parameter("max_angular_accel").value),
-                float(self.get_parameter("max_angular_accel").value),
+                float(self.get_parameter(linear_accel_param).value),
+                float(self.get_parameter(linear_accel_param).value),
+                float(self.get_parameter(linear_accel_param).value),
+                float(self.get_parameter(angular_accel_param).value),
+                float(self.get_parameter(angular_accel_param).value),
+                float(self.get_parameter(angular_accel_param).value),
             ],
             dtype=np.float64,
         )
@@ -82,6 +92,7 @@ class TeleopControlNode(Node):
         self.declare_parameter("control_hz", 50.0)
         self.declare_parameter("target_frame_id", "base")
         self.declare_parameter("servo_twist_topic", "/servo_node/delta_twist_cmds")
+        self.declare_parameter("tool_pose_topic", "/tcp_pose_broadcaster/pose")
         self.declare_parameter("auto_start_servo", True)
         self.declare_parameter("start_servo_service", "/servo_node/start_servo")
         self.declare_parameter("auto_switch_controllers", True)
@@ -106,8 +117,8 @@ class TeleopControlNode(Node):
         self.declare_parameter("linear_x_axis", 0)
         self.declare_parameter("linear_y_axis", 1)
         self.declare_parameter("linear_z_axis", -1)
-        self.declare_parameter("linear_z_up_axis", 5)
-        self.declare_parameter("linear_z_down_axis", 4)
+        self.declare_parameter("linear_z_up_axis", 4)
+        self.declare_parameter("linear_z_down_axis", 5)
         self.declare_parameter("linear_z_up_button", 1)
         self.declare_parameter("linear_z_down_button", 0)
         self.declare_parameter("angular_x_axis", 3)
@@ -126,40 +137,53 @@ class TeleopControlNode(Node):
         self.declare_parameter("mediapipe_topic", "")
         self.declare_parameter("mediapipe_depth_topic", "/camera/camera/aligned_depth_to_color/image_raw")
         self.declare_parameter("mediapipe_camera_info_topic", "/camera/camera/aligned_depth_to_color/camera_info")
+        self.declare_parameter("mediapipe_motion_mode", "target_pose")
         self.declare_parameter("mediapipe_deadzone", 0.02)
-        self.declare_parameter("mediapipe_linear_scale", 1.0)
+        self.declare_parameter("mediapipe_linear_scale", 2.8)
         self.declare_parameter("mediapipe_angular_scale", 1.0)
+        self.declare_parameter("mediapipe_position_linear_gain", 7.0)
+        self.declare_parameter("mediapipe_position_angular_gain", 5.0)
+        self.declare_parameter("mediapipe_max_linear_vel", 2.8)
+        self.declare_parameter("mediapipe_max_angular_vel", 5.0)
+        self.declare_parameter("mediapipe_max_linear_accel", 10.0)
+        self.declare_parameter("mediapipe_max_angular_accel", 18.0)
         self.declare_parameter("mediapipe_linear_axis_mapping", [0, 1, 2])
         self.declare_parameter("mediapipe_angular_axis_mapping", [0, 1, 2])
         self.declare_parameter("mediapipe_linear_axis_sign", [1.0, 1.0, 1.0])
         self.declare_parameter("mediapipe_angular_axis_sign", [1.0, 1.0, 1.0])
-        self.declare_parameter("mediapipe_hand_position_source", "hybrid")
+        self.declare_parameter("mediapipe_hand_position_source", "depth")
         self.declare_parameter("mediapipe_orientation_mode", "lock")
         self.declare_parameter("mediapipe_orientation_axis_mapping", [0, 1, 2])
         self.declare_parameter("mediapipe_orientation_axis_sign", [1.0, 1.0, 1.0])
         self.declare_parameter("mediapipe_depth_min_m", 0.1)
         self.declare_parameter("mediapipe_depth_max_m", 2.0)
         self.declare_parameter("mediapipe_depth_unit_scale", 0.001)
-        self.declare_parameter("mediapipe_smoothing_alpha", 0.2)
+        self.declare_parameter("mediapipe_smoothing_alpha", 0.45)
         self.declare_parameter("mediapipe_gripper_open_dist_px", 100.0)
         self.declare_parameter("mediapipe_gripper_close_dist_px", 20.0)
-        self.declare_parameter("mediapipe_gripper_open_dist_m", 0.12)
+        self.declare_parameter("mediapipe_gripper_open_dist_m", 0.10)
         self.declare_parameter("mediapipe_gripper_close_dist_m", 0.03)
         self.declare_parameter("mediapipe_gripper_metric_hold_sec", 0.25)
         self.declare_parameter("mediapipe_gripper_requires_deadman", True)
         self.declare_parameter("mediapipe_deadman_filter_enabled", True)
         self.declare_parameter("mediapipe_deadman_engage_confirm_sec", 0.10)
         self.declare_parameter("mediapipe_deadman_release_confirm_sec", 0.03)
-        self.declare_parameter("mediapipe_space_deadman_backend", "opencv")
+        self.declare_parameter("mediapipe_space_deadman_backend", "pynput")
         self.declare_parameter("mediapipe_space_deadman_hold_sec", 0.3)
         self.declare_parameter("mediapipe_show_debug_window", True)
 
         self.declare_parameter("gripper_cmd_topic", "/gripper/cmd")
         self.declare_parameter("gripper_command_delta", 0.01)
-        self.declare_parameter("robotiq_command_interface", "confidence_topic")
+        self.declare_parameter("gripper_quantization_levels", 10)
+        self.declare_parameter("robotiq_command_interface", "position_action")
         self.declare_parameter("robotiq_confidence_topic", "/robotiq_2f_gripper/confidence_command")
         self.declare_parameter("robotiq_binary_topic", "/robotiq_2f_gripper/binary_command")
+        self.declare_parameter("robotiq_action_name", "/robotiq_2f_gripper_action")
         self.declare_parameter("robotiq_binary_threshold", 0.5)
+        self.declare_parameter("robotiq_open_ratio", 0.9)
+        self.declare_parameter("robotiq_max_open_position_m", 0.142)
+        self.declare_parameter("robotiq_target_speed", 1.0)
+        self.declare_parameter("robotiq_target_force", 0.5)
         self.declare_parameter("qbsofthand_service_name", "/qbsofthand_control_node/set_closure")
         self.declare_parameter("qbsofthand_duration_sec", 0.3)
         self.declare_parameter("qbsofthand_speed_ratio", 1.0)
@@ -224,6 +248,12 @@ class TeleopControlNode(Node):
         self._home_zone_cancel_inflight = False
         try:
             future.result()
+        except Exception:
+            pass
+
+    def cancel_gripper_motion(self) -> None:
+        try:
+            self.gripper_ctrl.cancel_motion()
         except Exception:
             pass
 

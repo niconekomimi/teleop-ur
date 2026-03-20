@@ -11,14 +11,22 @@ from typing import Optional, Sequence
 
 import cv2
 from cv_bridge import CvBridge
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import PoseStamped, Twist
 import mediapipe as mp
 import numpy as np
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CameraInfo, Image, Joy
 
-from .transform_utils import _clamp, map_axis_linear, map_axis_nonlinear
+from .home_zone_utils import compute_pose_error
+from .transform_utils import (
+    _clamp,
+    map_axis_linear,
+    map_axis_nonlinear,
+    quat_multiply_xyzw,
+    quat_normalize_xyzw,
+    rotvec_to_quat_xyzw,
+)
 
 
 def _zero_twist() -> Twist:
@@ -136,6 +144,14 @@ class InputHandlerBase(ABC):
     def stop(self) -> None:
         """释放输入策略持有的资源。"""
 
+    def _request_gripper_cancel(self) -> None:
+        cancel_fn = getattr(self.node, "cancel_gripper_motion", None)
+        if callable(cancel_fn):
+            try:
+                cancel_fn()
+            except Exception:
+                pass
+
 
 class JoyInputHandler(InputHandlerBase):
     """Joy 手柄输入策略，内部完成映射和缓存。"""
@@ -175,6 +191,7 @@ class JoyInputHandler(InputHandlerBase):
         self._gripper_close_button = int(node.get_parameter("gripper_close_button").value)
         self._gripper_open_button = int(node.get_parameter("gripper_open_button").value)
         self._gripper_axis_inverted = bool(node.get_parameter("gripper_axis_inverted").value)
+        self._last_deadman_active = False
 
         node.create_subscription(Joy, self._joy_topic, self._joy_callback, qos_profile_sensor_data)
 
@@ -216,8 +233,12 @@ class JoyInputHandler(InputHandlerBase):
         axes = list(msg.axes)
         buttons = list(msg.buttons)
         twist = _zero_twist()
+        deadman_active = self._deadman_active(axes, buttons)
 
-        if self._deadman_active(axes, buttons):
+        if self._last_deadman_active and not deadman_active:
+            self._request_gripper_cancel()
+
+        if deadman_active:
             linear_z = self._axis_value(axes, self._linear_axes[2])
             if self._linear_axes[2] < 0:
                 linear_z = self._trigger_axis(axes, self._linear_z_up_axis, self._linear_z_down_axis)
@@ -247,18 +268,20 @@ class JoyInputHandler(InputHandlerBase):
         with self._lock:
             gripper = float(self._latest_gripper)
 
-        if self._gripper_axis >= 0 and self._gripper_axis < len(axes):
-            axis_val = self._axis_value(axes, self._gripper_axis)
-            gripper = axis_val if axis_val >= 0.0 else 0.5 * (axis_val + 1.0)
-            if self._gripper_axis_inverted:
-                gripper = 1.0 - gripper
-        else:
-            if self._button_value(buttons, self._gripper_close_button):
-                gripper = 1.0
-            elif self._button_value(buttons, self._gripper_open_button):
-                gripper = 0.0
+        if deadman_active:
+            if self._gripper_axis >= 0 and self._gripper_axis < len(axes):
+                axis_val = self._axis_value(axes, self._gripper_axis)
+                gripper = axis_val if axis_val >= 0.0 else 0.5 * (axis_val + 1.0)
+                if self._gripper_axis_inverted:
+                    gripper = 1.0 - gripper
+            else:
+                if self._button_value(buttons, self._gripper_close_button):
+                    gripper = 1.0
+                elif self._button_value(buttons, self._gripper_open_button):
+                    gripper = 0.0
 
         self._cache_command(twist, gripper)
+        self._last_deadman_active = deadman_active
 
     def get_command(self) -> tuple[Twist, float]:
         return self._get_cached_command()
@@ -269,9 +292,12 @@ class MediaPipeInputHandler(InputHandlerBase):
 
     def __init__(self, node: Node) -> None:
         super().__init__(node)
+        self._motion_mode = str(node.get_parameter("mediapipe_motion_mode").value).strip().lower()
         self._deadzone = float(node.get_parameter("mediapipe_deadzone").value)
         self._linear_scale = float(node.get_parameter("mediapipe_linear_scale").value)
         self._angular_scale = float(node.get_parameter("mediapipe_angular_scale").value)
+        self._position_linear_gain = float(node.get_parameter("mediapipe_position_linear_gain").value)
+        self._position_angular_gain = float(node.get_parameter("mediapipe_position_angular_gain").value)
         self._linear_mapping = [int(v) for v in node.get_parameter("mediapipe_linear_axis_mapping").value]
         self._angular_mapping = [int(v) for v in node.get_parameter("mediapipe_angular_axis_mapping").value]
         self._linear_sign = [float(v) for v in node.get_parameter("mediapipe_linear_axis_sign").value]
@@ -282,6 +308,7 @@ class MediaPipeInputHandler(InputHandlerBase):
         self._image_topic = configured_input_topic or legacy_topic or "/camera/camera/color/image_raw"
         self._depth_topic = str(node.get_parameter("mediapipe_depth_topic").value).strip()
         self._camera_info_topic = str(node.get_parameter("mediapipe_camera_info_topic").value).strip()
+        self._tool_pose_topic = str(node.get_parameter("tool_pose_topic").value).strip()
         self._hand_position_source = str(node.get_parameter("mediapipe_hand_position_source").value).strip().lower()
         self._orientation_mode = str(node.get_parameter("mediapipe_orientation_mode").value).strip().lower()
         self._orientation_mapping = [int(v) for v in node.get_parameter("mediapipe_orientation_axis_mapping").value]
@@ -303,12 +330,14 @@ class MediaPipeInputHandler(InputHandlerBase):
         self._show_debug_window = bool(node.get_parameter("mediapipe_show_debug_window").value)
         smoothing_alpha = float(node.get_parameter("mediapipe_smoothing_alpha").value)
 
+        if self._motion_mode not in {"velocity", "target_pose"}:
+            self._motion_mode = "target_pose"
         if self._hand_position_source not in {"depth", "normalized", "hybrid"}:
             self._hand_position_source = "hybrid"
         if self._orientation_mode not in {"lock", "hand_relative"}:
             self._orientation_mode = "lock"
         if self._space_deadman_backend not in {"opencv", "pynput"}:
-            self._space_deadman_backend = "opencv"
+            self._space_deadman_backend = "pynput"
 
         self._bridge = CvBridge()
         self._mp_hands = mp.solutions.hands
@@ -328,9 +357,13 @@ class MediaPipeInputHandler(InputHandlerBase):
         self._depth_fy: Optional[float] = None
         self._depth_cx: Optional[float] = None
         self._depth_cy: Optional[float] = None
+        self._latest_tool_pos: Optional[np.ndarray] = None
+        self._latest_tool_quat: Optional[np.ndarray] = None
 
         self._initial_hand_pos: Optional[np.ndarray] = None
         self._initial_hand_quat: Optional[np.ndarray] = None
+        self._initial_robot_pos: Optional[np.ndarray] = None
+        self._initial_robot_quat: Optional[np.ndarray] = None
         self._deadman_active = False
         self._space_deadman_until_ns = 0
         self._space_down = False
@@ -347,13 +380,16 @@ class MediaPipeInputHandler(InputHandlerBase):
             node.create_subscription(Image, self._depth_topic, self._depth_callback, qos_profile_sensor_data)
         if self._camera_info_topic:
             node.create_subscription(CameraInfo, self._camera_info_topic, self._camera_info_callback, qos_profile_sensor_data)
+        if self._tool_pose_topic:
+            node.create_subscription(PoseStamped, self._tool_pose_topic, self._tool_pose_callback, 10)
 
         if self._space_deadman_backend == "pynput":
             self._start_keyboard_listener()
 
         node.get_logger().info(
-            f"MediaPipeInputHandler ready. image_topic={self._image_topic}, depth_topic={self._depth_topic or '-'}, "
-            f"camera_info_topic={self._camera_info_topic or '-'}"
+            f"MediaPipeInputHandler ready. motion_mode={self._motion_mode}, image_topic={self._image_topic}, "
+            f"depth_topic={self._depth_topic or '-'}, camera_info_topic={self._camera_info_topic or '-'}, "
+            f"tool_pose_topic={self._tool_pose_topic or '-'}"
         )
 
     def _start_keyboard_listener(self) -> None:
@@ -414,6 +450,45 @@ class MediaPipeInputHandler(InputHandlerBase):
     def _current_gripper(self) -> float:
         with self._lock:
             return float(self._latest_gripper)
+
+    def _tool_pose_callback(self, msg: PoseStamped) -> None:
+        position = np.array(
+            [
+                msg.pose.position.x,
+                msg.pose.position.y,
+                msg.pose.position.z,
+            ],
+            dtype=np.float64,
+        )
+        quat = quat_normalize_xyzw(
+            np.array(
+                [
+                    msg.pose.orientation.x,
+                    msg.pose.orientation.y,
+                    msg.pose.orientation.z,
+                    msg.pose.orientation.w,
+                ],
+                dtype=np.float64,
+            )
+        )
+        self._latest_tool_pos = position
+        self._latest_tool_quat = quat
+
+    def _get_current_tool_pose(self) -> Optional[tuple[np.ndarray, np.ndarray]]:
+        tool_pos = getattr(self, "_latest_tool_pos", None)
+        tool_quat = getattr(self, "_latest_tool_quat", None)
+        if tool_pos is None or tool_quat is None:
+            return None
+        return np.asarray(tool_pos, dtype=np.float64).copy(), np.asarray(tool_quat, dtype=np.float64).copy()
+
+    def _reset_deadman_state(self) -> None:
+        self._deadman_active = False
+        self._initial_hand_pos = None
+        self._initial_hand_quat = None
+        self._initial_robot_pos = None
+        self._initial_robot_quat = None
+        self._linear_filter.reset(np.zeros(3, dtype=np.float64))
+        self._angular_filter.reset(np.zeros(3, dtype=np.float64))
 
     def _landmark_px(self, landmark, width: int, height: int) -> tuple[int, int]:
         return int(landmark.x * width), int(landmark.y * height)
@@ -610,6 +685,37 @@ class MediaPipeInputHandler(InputHandlerBase):
         mapped = self._select_axis(rotvec, self._orientation_mapping, self._orientation_sign, self._angular_scale)
         return self._angular_filter.apply(mapped)
 
+    def _build_pose_target_twist(
+        self,
+        wrist_pos: np.ndarray,
+        current_hand_quat: Optional[np.ndarray],
+    ) -> Optional[Twist]:
+        current_pose = self._get_current_tool_pose()
+        if (
+            current_pose is None
+            or self._initial_hand_pos is None
+            or self._initial_robot_pos is None
+            or self._initial_robot_quat is None
+        ):
+            return None
+
+        current_pos, current_quat = current_pose
+        delta_hand = wrist_pos - self._initial_hand_pos
+        target_offset = self._select_axis(delta_hand, self._linear_mapping, self._linear_sign, self._linear_scale)
+        target_offset = self._linear_filter.apply(target_offset)
+        target_pos = self._initial_robot_pos + target_offset
+
+        target_quat = self._initial_robot_quat.copy()
+        if self._orientation_mode == "hand_relative":
+            target_rotvec = self._compute_angular_delta(current_hand_quat)
+            target_quat = quat_multiply_xyzw(target_quat, rotvec_to_quat_xyzw(target_rotvec))
+            target_quat = quat_normalize_xyzw(target_quat)
+
+        pos_error, rot_error = compute_pose_error(current_pos, current_quat, target_pos, target_quat)
+        linear_values = pos_error * self._position_linear_gain
+        angular_values = rot_error * self._position_angular_gain
+        return self._build_twist(linear_values, angular_values)
+
     def _image_callback(self, msg: Image) -> None:
         try:
             cv_image = self._bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
@@ -654,29 +760,50 @@ class MediaPipeInputHandler(InputHandlerBase):
                 cached_gripper = gripper_cmd
 
             if deadman and wrist_pos is not None:
-                if not self._deadman_active:
-                    self._initial_hand_pos = wrist_pos.copy()
-                    self._initial_hand_quat = hand_quat.copy() if hand_quat is not None else None
-                    self._linear_filter.reset(np.zeros(3, dtype=np.float64))
-                    self._angular_filter.reset(np.zeros(3, dtype=np.float64))
-                    self._deadman_active = True
-                    self.node.get_logger().info("Deadman engaged; gesture teleop active")
+                pose_ready = self._motion_mode != "target_pose" or self._get_current_tool_pose() is not None
+                if not pose_ready:
+                    self._reset_deadman_state()
+                    status_text = "WAITING_TCP"
+                    status_color = (0, 165, 255)
+                else:
+                    if not self._deadman_active:
+                        self._initial_hand_pos = wrist_pos.copy()
+                        self._initial_hand_quat = hand_quat.copy() if hand_quat is not None else None
+                        if self._motion_mode == "target_pose":
+                            current_pose = self._get_current_tool_pose()
+                            if current_pose is not None:
+                                self._initial_robot_pos = current_pose[0].copy()
+                                self._initial_robot_quat = current_pose[1].copy()
+                        self._linear_filter.reset(np.zeros(3, dtype=np.float64))
+                        self._angular_filter.reset(np.zeros(3, dtype=np.float64))
+                        self._deadman_active = True
+                        self.node.get_logger().info(
+                            f"Deadman engaged; gesture teleop active ({self._motion_mode})"
+                        )
 
-                delta_hand = wrist_pos - self._initial_hand_pos
-                linear_values = self._select_axis(delta_hand, self._linear_mapping, self._linear_sign, self._linear_scale)
-                linear_values = self._linear_filter.apply(linear_values)
-                angular_values = self._compute_angular_delta(hand_quat)
-                twist = self._build_twist(linear_values, angular_values)
-                status_text = "CONTROLLING"
-                status_color = (0, 200, 0)
+                    if self._motion_mode == "target_pose":
+                        pose_twist = self._build_pose_target_twist(wrist_pos, hand_quat)
+                        if pose_twist is not None:
+                            twist = pose_twist
+                            status_text = "POSE_CTRL"
+                            status_color = (0, 200, 0)
+                        else:
+                            status_text = "WAITING_TCP"
+                            status_color = (0, 165, 255)
+                    else:
+                        delta_hand = wrist_pos - self._initial_hand_pos
+                        linear_values = self._select_axis(delta_hand, self._linear_mapping, self._linear_sign, self._linear_scale)
+                        linear_values = self._linear_filter.apply(linear_values)
+                        angular_values = self._compute_angular_delta(hand_quat)
+                        twist = self._build_twist(linear_values, angular_values)
+                        status_text = "CONTROLLING"
+                        status_color = (0, 200, 0)
             else:
                 if self._deadman_active:
                     self.node.get_logger().info("Deadman released; gesture teleop idle")
-                self._deadman_active = False
-                self._initial_hand_pos = None
-                self._initial_hand_quat = None
-                self._linear_filter.reset(np.zeros(3, dtype=np.float64))
-                self._angular_filter.reset(np.zeros(3, dtype=np.float64))
+                    if self._gripper_requires_deadman:
+                        self._request_gripper_cancel()
+                self._reset_deadman_state()
                 if wrist_pos is None and deadman:
                     status_text = "WAITING_DEPTH" if self._hand_position_source != "normalized" else "WAITING_HAND"
                     status_color = (0, 165, 255)
@@ -690,11 +817,9 @@ class MediaPipeInputHandler(InputHandlerBase):
         else:
             if self._deadman_active:
                 self.node.get_logger().info("Hand lost; stopping motion")
-            self._deadman_active = False
-            self._initial_hand_pos = None
-            self._initial_hand_quat = None
-            self._linear_filter.reset(np.zeros(3, dtype=np.float64))
-            self._angular_filter.reset(np.zeros(3, dtype=np.float64))
+                if self._gripper_requires_deadman:
+                    self._request_gripper_cancel()
+            self._reset_deadman_state()
 
         self._cache_command(twist, cached_gripper)
 

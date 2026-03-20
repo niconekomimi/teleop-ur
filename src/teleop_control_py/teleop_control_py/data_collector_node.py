@@ -9,6 +9,7 @@ import sys
 import threading
 import time
 from collections import deque
+from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
 import numpy as np
@@ -16,13 +17,12 @@ import rclpy
 import h5py
 from builtin_interfaces.msg import Duration as DurationMsg
 from controller_manager_msgs.srv import ListControllers, SwitchController
-from cv_bridge import CvBridge
 from geometry_msgs.msg import PoseStamped
 from geometry_msgs.msg import TwistStamped
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from rclpy.time import Time
-from sensor_msgs.msg import Image, JointState
+from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool, Float32, Float32MultiArray
 from std_srvs.srv import Trigger
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
@@ -30,8 +30,19 @@ from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from .camera_client import OAKClient, RealSenseClient
 from .home_zone_utils import compose_pose_with_rpy_offset, drive_pose_target, pose_to_string, sample_home_zone_pose_offsets
 from .hdf5_writer import Command, HDF5WriterThread, Sample
+from .preview_api import PreviewApiServer
 from .transform_utils import _clamp, center_crop_square_and_resize_rgb, compose_eef_action
 from .ur_kinematics import try_forward_kinematics
+
+
+@dataclass(frozen=True)
+class CameraFramePair:
+    global_bgr: np.ndarray
+    wrist_bgr: np.ndarray
+    global_time: Time
+    wrist_time: Time
+    ref_time: Time
+    skew_sec: float
 
 
 class DataCollectorNode(Node):
@@ -65,8 +76,11 @@ class DataCollectorNode(Node):
             ],
         )
         self.declare_parameter("pose_max_age_sec", 0.2)
+        self.declare_parameter("joint_max_age_sec", 0.2)
         self.declare_parameter("command_max_age_sec", 0.2)
         self.declare_parameter("gripper_max_age_sec", 0.5)
+        self.declare_parameter("image_max_age_sec", 0.10)
+        self.declare_parameter("camera_pair_max_skew_sec", 0.15)
         self.declare_parameter("pose_stamp_zero_is_ref", True)
         self.declare_parameter("pose_use_received_time_fallback", True)
         self.declare_parameter("stats_period_sec", 2.0)
@@ -74,10 +88,11 @@ class DataCollectorNode(Node):
         self.declare_parameter("writer_batch_size", 32)
         self.declare_parameter("writer_flush_every_n", 200)
         self.declare_parameter("image_compression", "lzf")
-        self.declare_parameter("preview_enabled", True)
         self.declare_parameter("preview_fps", 30.0)
-        self.declare_parameter("preview_global_topic", "/data_collector/preview/global/image_raw")
-        self.declare_parameter("preview_wrist_topic", "/data_collector/preview/wrist/image_raw")
+        self.declare_parameter("preview_api_enabled", True)
+        self.declare_parameter("preview_api_host", "127.0.0.1")
+        self.declare_parameter("preview_api_port", 8765)
+        self.declare_parameter("preview_api_jpeg_quality", 80)
         self.declare_parameter("enable_keyboard", False)
         self.declare_parameter("ur_type", "ur5")
         self.declare_parameter(
@@ -109,8 +124,11 @@ class DataCollectorNode(Node):
         self._ur_type = str(self.get_parameter("ur_type").value).strip().lower() or "ur5"
         self._joint_names = list(self.get_parameter("joint_names").value)
         self._pose_max_age = float(self.get_parameter("pose_max_age_sec").value)
+        self._joint_max_age = float(self.get_parameter("joint_max_age_sec").value)
         self._command_max_age = float(self.get_parameter("command_max_age_sec").value)
         self._gripper_max_age = float(self.get_parameter("gripper_max_age_sec").value)
+        self._image_max_age = float(self.get_parameter("image_max_age_sec").value)
+        self._camera_pair_max_skew = float(self.get_parameter("camera_pair_max_skew_sec").value)
         self._pose_stamp_zero_is_ref = bool(self.get_parameter("pose_stamp_zero_is_ref").value)
         self._pose_use_received_time_fallback = bool(self.get_parameter("pose_use_received_time_fallback").value)
         self._require_gripper = bool(self.get_parameter("require_gripper").value)
@@ -143,6 +161,7 @@ class DataCollectorNode(Node):
         self._recent_frame_times = deque()
 
         self._latest_joint_pos: Optional[np.ndarray] = None
+        self._latest_joint_time: Optional[Time] = None
         self._latest_pose_pos: Optional[np.ndarray] = None
         self._latest_pose_quat: Optional[np.ndarray] = None
         self._latest_pose_time: Optional[Time] = None
@@ -154,7 +173,10 @@ class DataCollectorNode(Node):
         self._latest_gripper_time: Optional[Time] = None
         self._latest_global_bgr: Optional[np.ndarray] = None
         self._latest_wrist_bgr: Optional[np.ndarray] = None
-        self._latest_frame_time: Optional[float] = None
+        self._latest_global_frame_time: Optional[Time] = None
+        self._latest_wrist_frame_time: Optional[Time] = None
+        self._latest_frame_ref_time: Optional[Time] = None
+        self._latest_frame_skew_sec: Optional[float] = None
 
         self._stats: Dict[str, int] = {}
         self._homing_in_progress = False
@@ -163,13 +185,12 @@ class DataCollectorNode(Node):
         self._home_zone_lock = threading.Lock()
         self._keyboard_thread: Optional[threading.Thread] = None
         self._keyboard_stop_evt = threading.Event()
-        self._bridge = CvBridge()
-        self._preview_enabled = bool(self.get_parameter("preview_enabled").value)
-        self._preview_global_topic = str(self.get_parameter("preview_global_topic").value)
-        self._preview_wrist_topic = str(self.get_parameter("preview_wrist_topic").value)
-        self._preview_global_pub = None
-        self._preview_wrist_pub = None
+        self._preview_api_enabled = bool(self.get_parameter("preview_api_enabled").value)
+        self._preview_api_host = str(self.get_parameter("preview_api_host").value).strip() or "127.0.0.1"
+        self._preview_api_port = int(self.get_parameter("preview_api_port").value)
+        self._preview_api_jpeg_quality = int(self.get_parameter("preview_api_jpeg_quality").value)
         self._preview_timer = None
+        self._preview_api_server: Optional[PreviewApiServer] = None
 
         qmax = int(self.get_parameter("queue_maxsize").value)
         self._queue: "queue.Queue[object]" = queue.Queue(maxsize=max(1, qmax))
@@ -210,11 +231,23 @@ class DataCollectorNode(Node):
         self._record_stats_pub = self.create_publisher(Float32MultiArray, "~/record_stats", 10)
         self._home_zone_active_pub = self.create_publisher(Bool, "~/home_zone_active", 10)
 
-        if self._preview_enabled:
-            self._preview_global_pub = self.create_publisher(Image, self._preview_global_topic, qos_profile_sensor_data)
-            self._preview_wrist_pub = self.create_publisher(Image, self._preview_wrist_topic, qos_profile_sensor_data)
+        if self._preview_api_enabled:
             preview_fps = max(0.1, float(self.get_parameter("preview_fps").value))
             self._preview_timer = self.create_timer(1.0 / preview_fps, self._preview_step)
+
+        if self._preview_api_enabled:
+            try:
+                self._preview_api_server = PreviewApiServer(
+                    host=self._preview_api_host,
+                    port=self._preview_api_port,
+                    frame_provider=self._get_preview_frame_for_api,
+                    jpeg_quality=self._preview_api_jpeg_quality,
+                    logger=self.get_logger(),
+                )
+                self._preview_api_server.start()
+            except Exception as exc:  # noqa: BLE001
+                self._preview_api_server = None
+                self.get_logger().warn(f"启动 Preview API 失败，预览窗口将无法拉取采集画面: {exc!r}")
 
         self._srv_start = self.create_service(Trigger, "~/start", self._srv_start_cb)
         self._srv_stop = self.create_service(Trigger, "~/stop", self._srv_stop_cb)
@@ -240,10 +273,10 @@ class DataCollectorNode(Node):
         if self._demo_index > 0:
             self.get_logger().info(f"Detected existing demos in HDF5. Next demo index: {self._demo_index}")
 
-        if self._preview_enabled:
+        if self._preview_api_enabled:
             self.get_logger().info(
-                "Preview topics enabled. "
-                f"Global={self._preview_global_topic}, Wrist={self._preview_wrist_topic}"
+                "Preview API enabled. "
+                f"Host={self._preview_api_host}, Port={self._preview_api_port}, JPEG={self._preview_api_jpeg_quality}"
             )
 
     def _normalize_camera_source(self, value: object) -> str:
@@ -369,8 +402,13 @@ class DataCollectorNode(Node):
             self._inc_stat("joint_map_fail")
             return
 
+        joint_time = Time.from_msg(msg.header.stamp)
+        if joint_time.nanoseconds == 0:
+            joint_time = self.get_clock().now()
+
         with self._cache_lock:
             self._latest_joint_pos = joint_pos
+            self._latest_joint_time = joint_time
 
     def _on_tool_pose(self, msg: PoseStamped) -> None:
         pose_time = Time.from_msg(msg.header.stamp)
@@ -436,6 +474,7 @@ class DataCollectorNode(Node):
     ) -> Tuple[Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, float]], Optional[str], Optional[str]]:
         with self._cache_lock:
             joint_pos = None if self._latest_joint_pos is None else self._latest_joint_pos.copy()
+            joint_time = self._latest_joint_time
             pose_pos = None if self._latest_pose_pos is None else self._latest_pose_pos.copy()
             pose_quat = None if self._latest_pose_quat is None else self._latest_pose_quat.copy()
             pose_time = self._latest_pose_time
@@ -445,6 +484,16 @@ class DataCollectorNode(Node):
 
         if joint_pos is None:
             return None, "no_joint", None
+        if joint_time is None:
+            return None, "joint_stale", "joint_states 缺少有效时间戳。"
+        if self._joint_max_age > 0.0:
+            joint_age = abs((ref_time - joint_time).nanoseconds) * 1e-9
+            if joint_age > self._joint_max_age:
+                return (
+                    None,
+                    "joint_stale",
+                    f"joint_states 过旧，topic={self.get_parameter('joint_states_topic').value}, age={joint_age:.3f}s。",
+                )
         if pose_pos is None or pose_quat is None or pose_time is None:
             return None, "no_pose", None
 
@@ -477,7 +526,7 @@ class DataCollectorNode(Node):
                 return None, "no_gripper", None
             gripper = 0.0
         elif self._gripper_max_age > 0.0:
-            if abs((self.get_clock().now() - gripper_time).nanoseconds) * 1e-9 > self._gripper_max_age:
+            if abs((ref_time - gripper_time).nanoseconds) * 1e-9 > self._gripper_max_age:
                 if self._require_gripper:
                     return None, "gripper_stale", None
 
@@ -500,76 +549,107 @@ class DataCollectorNode(Node):
                     "action_cmd_stale",
                     f"servo twist 命令过旧，topic={self.get_parameter('servo_twist_topic').value}, age={cmd_age:.3f}s。",
                 )
+        return compose_eef_action(linear, angular, gripper), None, None
 
-            return compose_eef_action(linear, angular, gripper), None, None
-
-    def _pull_camera_frames(self) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+    def _pull_camera_frames(self) -> Optional[CameraFramePair]:
         if self.global_cam is None or self.wrist_cam is None:
-            return None, None
+            return None
 
         with self._camera_pull_lock:
+            global_start = self.get_clock().now()
             global_bgr = self.global_cam.get_bgr_frame()
+            global_end = self.get_clock().now()
+            wrist_start = self.get_clock().now()
             wrist_bgr = self.wrist_cam.get_bgr_frame()
-        return global_bgr, wrist_bgr
+            wrist_end = self.get_clock().now()
 
-    def _cache_camera_frames(self, global_bgr: Optional[np.ndarray], wrist_bgr: Optional[np.ndarray]) -> None:
         if global_bgr is None or wrist_bgr is None:
+            return None
+
+        global_time = global_end if global_end.nanoseconds >= global_start.nanoseconds else global_start
+        wrist_time = wrist_end if wrist_end.nanoseconds >= wrist_start.nanoseconds else wrist_start
+        ref_time = wrist_time if wrist_time.nanoseconds >= global_time.nanoseconds else global_time
+        skew_sec = abs((wrist_time - global_time).nanoseconds) * 1e-9
+        return CameraFramePair(
+            global_bgr=np.ascontiguousarray(global_bgr),
+            wrist_bgr=np.ascontiguousarray(wrist_bgr),
+            global_time=global_time,
+            wrist_time=wrist_time,
+            ref_time=ref_time,
+            skew_sec=skew_sec,
+        )
+
+    def _cache_camera_frames(self, frame_pair: Optional[CameraFramePair]) -> None:
+        if frame_pair is None:
             return
 
         with self._cache_lock:
-            self._latest_global_bgr = np.ascontiguousarray(global_bgr)
-            self._latest_wrist_bgr = np.ascontiguousarray(wrist_bgr)
-            self._latest_frame_time = time.monotonic()
+            self._latest_global_bgr = frame_pair.global_bgr.copy()
+            self._latest_wrist_bgr = frame_pair.wrist_bgr.copy()
+            self._latest_global_frame_time = frame_pair.global_time
+            self._latest_wrist_frame_time = frame_pair.wrist_time
+            self._latest_frame_ref_time = frame_pair.ref_time
+            self._latest_frame_skew_sec = float(frame_pair.skew_sec)
 
-    def _get_cached_camera_frames(self) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+    def _get_cached_camera_frames(self) -> Optional[CameraFramePair]:
         with self._cache_lock:
-            global_bgr = None if self._latest_global_bgr is None else self._latest_global_bgr.copy()
-            wrist_bgr = None if self._latest_wrist_bgr is None else self._latest_wrist_bgr.copy()
-        return global_bgr, wrist_bgr
+            if (
+                self._latest_global_bgr is None
+                or self._latest_wrist_bgr is None
+                or self._latest_global_frame_time is None
+                or self._latest_wrist_frame_time is None
+                or self._latest_frame_ref_time is None
+                or self._latest_frame_skew_sec is None
+            ):
+                return None
+            return CameraFramePair(
+                global_bgr=self._latest_global_bgr.copy(),
+                wrist_bgr=self._latest_wrist_bgr.copy(),
+                global_time=self._latest_global_frame_time,
+                wrist_time=self._latest_wrist_frame_time,
+                ref_time=self._latest_frame_ref_time,
+                skew_sec=float(self._latest_frame_skew_sec),
+            )
 
-    def _pull_and_cache_camera_frames(self) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
-        global_bgr, wrist_bgr = self._pull_camera_frames()
-        self._cache_camera_frames(global_bgr, wrist_bgr)
-        return global_bgr, wrist_bgr
+    def _get_preview_frame_for_api(self, camera_name: str) -> Optional[np.ndarray]:
+        frame_pair = self._get_cached_camera_frames()
+        if frame_pair is None:
+            return None
+        if camera_name == "global":
+            return frame_pair.global_bgr
+        if camera_name == "wrist":
+            return frame_pair.wrist_bgr
+        return None
 
-    def _publish_preview_frames(self, global_bgr: Optional[np.ndarray], wrist_bgr: Optional[np.ndarray]) -> None:
-        if not self._preview_enabled:
-            return
-
-        stamp = self.get_clock().now().to_msg()
-
-        if global_bgr is not None and self._preview_global_pub is not None:
-            try:
-                msg = self._bridge.cv2_to_imgmsg(global_bgr, encoding="bgr8")
-                msg.header.stamp = stamp
-                msg.header.frame_id = "data_collector_global_preview"
-                self._preview_global_pub.publish(msg)
-            except Exception as exc:  # noqa: BLE001
-                self._warn_throttled("preview_global_pub", f"发布全局预览图失败: {exc!r}")
-
-        if wrist_bgr is not None and self._preview_wrist_pub is not None:
-            try:
-                msg = self._bridge.cv2_to_imgmsg(wrist_bgr, encoding="bgr8")
-                msg.header.stamp = stamp
-                msg.header.frame_id = "data_collector_wrist_preview"
-                self._preview_wrist_pub.publish(msg)
-            except Exception as exc:  # noqa: BLE001
-                self._warn_throttled("preview_wrist_pub", f"发布手部预览图失败: {exc!r}")
+    def _pull_and_cache_camera_frames(self) -> Optional[CameraFramePair]:
+        frame_pair = self._pull_camera_frames()
+        self._cache_camera_frames(frame_pair)
+        return frame_pair
 
     def _preview_step(self) -> None:
         if self.global_cam is None or self.wrist_cam is None:
             return
 
         try:
-            global_bgr, wrist_bgr = self._pull_and_cache_camera_frames()
+            frame_pair = self._pull_and_cache_camera_frames()
         except Exception as exc:  # noqa: BLE001
             self._warn_throttled("preview_pull", f"拉取预览图像失败: {exc!r}")
             return
 
-        if global_bgr is None or wrist_bgr is None:
+        if frame_pair is None:
             return
 
-        self._publish_preview_frames(global_bgr, wrist_bgr)
+    def _select_record_camera_frames(self) -> Optional[CameraFramePair]:
+        frame_pair = self._get_cached_camera_frames()
+        if frame_pair is not None and self._image_max_age > 0.0:
+            image_age = abs((self.get_clock().now() - frame_pair.ref_time).nanoseconds) * 1e-9
+            if image_age > self._image_max_age:
+                frame_pair = None
+
+        if frame_pair is None:
+            frame_pair = self._pull_and_cache_camera_frames()
+
+        return frame_pair
 
     def _capture_step(self) -> None:
         with self._record_lock:
@@ -584,25 +664,33 @@ class DataCollectorNode(Node):
             return
 
         try:
-            global_bgr, wrist_bgr = self._get_cached_camera_frames()
-            if global_bgr is None or wrist_bgr is None:
-                global_bgr, wrist_bgr = self._pull_and_cache_camera_frames()
+            frame_pair = self._select_record_camera_frames()
         except Exception as exc:  # noqa: BLE001
             self._warn_throttled("camera_pull", f"主动拉取相机图像失败: {exc!r}")
             self._inc_stat("camera_pull_fail")
             return
 
-        if global_bgr is None or wrist_bgr is None:
+        if frame_pair is None:
             self._inc_stat("camera_empty")
             return
 
-        ref_time = self.get_clock().now()
+        if self._camera_pair_max_skew > 0.0 and frame_pair.skew_sec > self._camera_pair_max_skew:
+            self._inc_stat("camera_skew")
+            self._warn_throttled(
+                "camera_skew",
+                f"双相机时间偏差过大，当前帧跳过: skew={frame_pair.skew_sec:.3f}s。",
+            )
+            return
+
+        ref_time = frame_pair.ref_time
         cached, reason, detail = self._get_cached_state(ref_time)
         if cached is None:
             reason = reason or "missing_state"
             self._inc_stat(reason)
             if reason == "no_joint":
                 self._warn_throttled("no_joint", "尚未收到有效 /joint_states，当前帧跳过。")
+            elif reason == "joint_stale":
+                self._warn_throttled("joint_stale", detail or "joint_states 过旧，当前帧跳过。")
             elif reason == "no_pose":
                 self._warn_throttled("no_pose", "尚未收到有效末端位姿，当前帧跳过。")
             elif reason == "pose_stale":
@@ -616,8 +704,8 @@ class DataCollectorNode(Node):
         joint_pos, eef_pos, eef_quat, gripper = cached
 
         try:
-            agentview_rgb = center_crop_square_and_resize_rgb(global_bgr, self._obs_image_size)
-            eye_in_hand_rgb = center_crop_square_and_resize_rgb(wrist_bgr, self._obs_image_size)
+            agentview_rgb = center_crop_square_and_resize_rgb(frame_pair.global_bgr, self._obs_image_size)
+            eye_in_hand_rgb = center_crop_square_and_resize_rgb(frame_pair.wrist_bgr, self._obs_image_size)
         except Exception as exc:  # noqa: BLE001
             self._warn_throttled("image_fail", f"图像预处理失败: {exc!r}")
             self._inc_stat("image_fail")
@@ -1235,6 +1323,13 @@ class DataCollectorNode(Node):
             active_demo = self._current_demo_name
             self._recording = False
             self._current_demo_name = None
+
+        if self._preview_api_server is not None:
+            try:
+                self._preview_api_server.stop()
+            except Exception as exc:  # noqa: BLE001
+                self.get_logger().warn(f"停止 Preview API 失败: {exc!r}")
+            self._preview_api_server = None
 
         if active_demo is not None:
             try:

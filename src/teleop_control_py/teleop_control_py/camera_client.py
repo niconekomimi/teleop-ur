@@ -32,7 +32,17 @@ class RealSenseClient:
 
     def get_bgr_frame(self) -> Optional[np.ndarray]:
         try:
-            frames = self._pipeline.wait_for_frames(timeout_ms=200)
+            # Drain unread frames first so recording consumes the freshest available image.
+            frames = None
+            if hasattr(self._pipeline, "poll_for_frames"):
+                while True:
+                    polled = self._pipeline.poll_for_frames()
+                    if not polled:
+                        break
+                    frames = polled
+
+            if frames is None:
+                frames = self._pipeline.wait_for_frames(timeout_ms=200)
             color_frame = frames.get_color_frame()
             if color_frame is None:
                 return None

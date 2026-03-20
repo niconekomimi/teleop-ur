@@ -50,22 +50,20 @@ from teleop_control_py.model_inference import (
     load_embedding_keys,
 )
 
+from .http_preview_worker import HttpPreviewWorker
 from .ros_worker import ROS2Worker
 from .widgets import CameraPreviewWindow, HDF5ViewerDialog
 
 
 class TeleopMainWindow(QMainWindow):
-    COLLECTOR_PREVIEW_GLOBAL_TOPIC = "/data_collector/preview/global/image_raw"
-    COLLECTOR_PREVIEW_WRIST_TOPIC = "/data_collector/preview/wrist/image_raw"
-    INFERENCE_PREVIEW_GLOBAL_TOPIC = "/model_inference/preview/global/image_raw"
-    INFERENCE_PREVIEW_WRIST_TOPIC = "/model_inference/preview/wrist/image_raw"
+    COLLECTOR_PREVIEW_API_BASE_URL = "http://127.0.0.1:8765"
     COLLECTOR_POSE_TOPIC = "/tcp_pose_broadcaster/pose"
     COLLECTOR_GRIPPER_TOPIC = "/gripper/cmd"
     COLLECTOR_ACTION_TOPIC = "/servo_node/delta_twist_cmds"
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("LIBERO Teleop & Data Collection Station")
+        self.setWindowTitle("Teleop & Data Collection Station")
         self.resize(1240, 860)
         self.setMinimumSize(1240, 860)
 
@@ -74,6 +72,10 @@ class TeleopMainWindow(QMainWindow):
         self.ros_worker = None
         self.inference_worker = None
         self.preview_window = None
+        self.preview_api_worker = None
+        self._preview_api_active = False
+        self._latest_inference_global_bgr = None
+        self._latest_inference_wrist_bgr = None
         self.module_status_labels = {}
         self.hardware_status_labels = {}
 
@@ -91,6 +93,11 @@ class TeleopMainWindow(QMainWindow):
     def _shutdown(self) -> None:
         try:
             self.stop_inference()
+        except Exception:
+            pass
+
+        try:
+            self._stop_preview_api_worker()
         except Exception:
             pass
 
@@ -502,6 +509,7 @@ class TeleopMainWindow(QMainWindow):
         self.global_camera_source_combo.currentIndexChanged.connect(self._refresh_runtime_status)
         self.wrist_camera_source_combo.currentIndexChanged.connect(self._refresh_runtime_status)
         self.inference_env_combo.currentIndexChanged.connect(self.refresh_inference_task_names)
+        self.inference_task_combo.currentTextChanged.connect(self._notify_running_inference_goal_changed)
         self.inference_model_dir_input.textChanged.connect(self._sync_inference_model_dir_tooltip)
         self.ee_combo.currentIndexChanged.connect(self._refresh_runtime_status)
         self.ee_combo.currentIndexChanged.connect(self._sync_ros_worker_inference_control_config)
@@ -595,8 +603,6 @@ class TeleopMainWindow(QMainWindow):
     def _default_mediapipe_topics(self) -> List[str]:
         return [
             self.gui_settings.default_mediapipe_input_topic,
-            self.gui_settings.default_preview_global_topic,
-            self.gui_settings.default_preview_wrist_topic,
             "/camera/camera/color/image_raw",
             "/camera/color/image_raw",
             "/color/video/image",
@@ -650,19 +656,14 @@ class TeleopMainWindow(QMainWindow):
             self.log(f"已刷新手势识别输入话题，共 {self.mediapipe_topic_combo.count()} 个候选项。")
         self._update_input_hint()
 
-    def _preview_global_topic(self) -> str:
-        if self._process_running("data_collector"):
-            return self.COLLECTOR_PREVIEW_GLOBAL_TOPIC
-        if self.inference_worker is not None or self.btn_inference.isChecked():
-            return self.INFERENCE_PREVIEW_GLOBAL_TOPIC
-        return self.gui_settings.default_preview_global_topic
+    def _preview_window_visible(self) -> bool:
+        return bool(self.preview_window is not None and self.preview_window.isVisible())
 
-    def _preview_wrist_topic(self) -> str:
-        if self._process_running("data_collector"):
-            return self.COLLECTOR_PREVIEW_WRIST_TOPIC
-        if self.inference_worker is not None or self.btn_inference.isChecked():
-            return self.INFERENCE_PREVIEW_WRIST_TOPIC
-        return self.gui_settings.default_preview_wrist_topic
+    def _collector_preview_api_should_run(self) -> bool:
+        return self._preview_window_visible() and self._process_running("data_collector")
+
+    def _inference_preview_should_render(self) -> bool:
+        return self._preview_window_visible() and self._inference_running() and not self._process_running("data_collector")
 
     def _selected_reverse_ip(self) -> str:
         configured_ip = self.gui_settings.default_reverse_ip.strip()
@@ -744,6 +745,7 @@ class TeleopMainWindow(QMainWindow):
         self.inference_embedding_input.setToolTip(normalized_path)
         self.inference_embedding_input.setCursorPosition(0)
         self._populate_inference_tasks_from_embedding(Path(normalized_path))
+        self._notify_running_inference_goal_changed()
         self.log(f"推理 embedding 文件已手动指定为: {normalized_path}")
 
     def refresh_inference_options(self) -> None:
@@ -792,6 +794,7 @@ class TeleopMainWindow(QMainWindow):
         self.inference_embedding_input.setToolTip(text)
         self.inference_embedding_input.setCursorPosition(0)
         self._populate_inference_tasks_from_embedding(embedding_path)
+        self._notify_running_inference_goal_changed()
 
     def update_inference_embedding_path(self) -> None:
         env_name = self._selected_inference_env()
@@ -801,6 +804,31 @@ class TeleopMainWindow(QMainWindow):
         self.inference_embedding_input.setToolTip(text)
         self.inference_embedding_input.setCursorPosition(0)
         self._populate_inference_tasks_from_embedding(embedding_path)
+        self._notify_running_inference_goal_changed()
+
+    def _notify_running_inference_goal_changed(self, *_args) -> None:
+        worker = self.inference_worker
+        if worker is None or not worker.isRunning():
+            return
+
+        task_name = self._selected_inference_task_name()
+        embedding_path_text = self.inference_embedding_input.text().strip()
+        if not task_name or not embedding_path_text:
+            return
+
+        embedding_path = Path(embedding_path_text).expanduser().resolve()
+        if not embedding_path.is_file():
+            self.log(f"推理任务切换已忽略: embedding 文件不存在 {embedding_path}")
+            return
+
+        if task_name not in load_embedding_keys(embedding_path):
+            self.log(f"推理任务切换已忽略: 任务 `{task_name}` 不在 embedding 文件 {embedding_path} 中")
+            return
+
+        worker.request_task_update(
+            task_name=task_name,
+            task_embedding_path=str(embedding_path),
+        )
 
     def _set_inference_status(self, text: str, color: str) -> None:
         self.lbl_inference_status.setText(text)
@@ -864,16 +892,86 @@ class TeleopMainWindow(QMainWindow):
         self.ros_worker.stop()
         self.ros_worker = None
 
+    def _start_preview_api_worker(self) -> None:
+        if not self._collector_preview_api_should_run():
+            return
+        if self.preview_api_worker is not None:
+            self.preview_api_worker.set_base_url(self.COLLECTOR_PREVIEW_API_BASE_URL)
+            return
+
+        self.preview_api_worker = HttpPreviewWorker(self.COLLECTOR_PREVIEW_API_BASE_URL, fps=30.0)
+        self.preview_api_worker.availability_signal.connect(self._on_preview_api_availability_changed)
+        self.preview_api_worker.log_signal.connect(self.log)
+        if self.preview_window is not None:
+            self.preview_api_worker.global_image_signal.connect(self.preview_window.update_global_image)
+            self.preview_api_worker.wrist_image_signal.connect(self.preview_window.update_wrist_image)
+        self.preview_api_worker.start()
+
+    def _stop_preview_api_worker(self) -> None:
+        worker = self.preview_api_worker
+        self.preview_api_worker = None
+        self._preview_api_active = False
+        if worker is None:
+            return
+        worker.stop()
+
+    @Slot(bool)
+    def _on_preview_api_availability_changed(self, available: bool) -> None:
+        self._preview_api_active = bool(available)
+        if self.preview_window is not None:
+            source = "采集节点 API" if available else "采集节点 API (未就绪)"
+            self.preview_window.set_preview_source(source)
+            if not available:
+                self.preview_window.clear_images()
+
+    def _cache_inference_preview_frames(self, global_bgr, wrist_bgr) -> None:
+        self._latest_inference_global_bgr = None if global_bgr is None else np.ascontiguousarray(global_bgr).copy()
+        self._latest_inference_wrist_bgr = None if wrist_bgr is None else np.ascontiguousarray(wrist_bgr).copy()
+
+    def _clear_inference_preview_frames(self) -> None:
+        self._latest_inference_global_bgr = None
+        self._latest_inference_wrist_bgr = None
+
+    def _render_inference_preview_frames(self) -> None:
+        if not self._inference_preview_should_render() or self.preview_window is None:
+            return
+        if self._latest_inference_global_bgr is not None:
+            self.preview_window.update_global_image(self._latest_inference_global_bgr)
+        if self._latest_inference_wrist_bgr is not None:
+            self.preview_window.update_wrist_image(self._latest_inference_wrist_bgr)
+
     def _ensure_ros_worker_for_inference(self) -> None:
         if self.ros_worker is not None:
             return
-        self.start_ros_worker(self._preview_global_topic(), self._preview_wrist_topic())
+        self.start_ros_worker()
         self.log("已启动 ROS 监听器，用于给推理读取机器人状态。")
 
-    def _sync_preview_topics(self) -> None:
-        if self.ros_worker is None:
+    def _sync_preview_pipeline(self) -> None:
+        if not self._preview_window_visible():
+            self._stop_preview_api_worker()
             return
-        self.ros_worker.set_image_topics(self._preview_global_topic(), self._preview_wrist_topic())
+
+        if self._collector_preview_api_should_run():
+            self._start_preview_api_worker()
+            if self.preview_window is not None:
+                source = "采集节点 API" if self._preview_api_active else "采集节点 API (连接中)"
+                self.preview_window.set_preview_source(source)
+                if not self._preview_api_active:
+                    self.preview_window.clear_images()
+            return
+
+        self._stop_preview_api_worker()
+        if self._inference_preview_should_render():
+            if self.preview_window is not None:
+                self.preview_window.set_preview_source("推理直连")
+                if self._latest_inference_global_bgr is None and self._latest_inference_wrist_bgr is None:
+                    self.preview_window.clear_images()
+            self._render_inference_preview_frames()
+            return
+
+        if self.preview_window is not None:
+            self.preview_window.set_preview_source("无活动图像源")
+            self.preview_window.clear_images()
 
     def _current_robot_state_for_inference(self) -> Optional[np.ndarray]:
         if self.ros_worker is None:
@@ -1019,6 +1117,9 @@ class TeleopMainWindow(QMainWindow):
             self._set_button_running(self.btn_camera_driver, False, "启动相机驱动", "停止当前驱动")
             self.btn_camera_driver.setToolTip(f"点击启动所选相机驱动 {selected_driver}。")
 
+        if preview_running:
+            self._sync_preview_pipeline()
+
     def _inference_module_summary(self) -> tuple[str, str]:
         status_text = self.lbl_inference_status.text().strip()
         exec_text = self.lbl_inference_execute_status.text().strip()
@@ -1076,6 +1177,7 @@ class TeleopMainWindow(QMainWindow):
             return
         if key == "data_collector":
             self._set_button_running(self.btn_collector, False, "启动采集节点", "停止采集节点")
+            self._sync_preview_pipeline()
             self._stop_ros_worker_if_unused()
 
     def _poll_subprocesses(self) -> None:
@@ -1244,8 +1346,6 @@ class TeleopMainWindow(QMainWindow):
     def toggle_data_collector(self, checked):
         if checked:
             out_path = self._selected_record_output_path()
-            global_topic = self.COLLECTOR_PREVIEW_GLOBAL_TOPIC
-            wrist_topic = self.COLLECTOR_PREVIEW_WRIST_TOPIC
             collector_ee_type = self._selected_collector_end_effector_type()
             global_camera_source = self._selected_camera_source(self.global_camera_source_combo, "realsense")
             wrist_camera_source = self._selected_camera_source(self.wrist_camera_source_combo, self.gui_settings.default_wrist_camera_source)
@@ -1274,8 +1374,7 @@ class TeleopMainWindow(QMainWindow):
             self.log(
                 "准备启动采集节点: "
                 f"end_effector_type={collector_ee_type}, output_path={out_path}, "
-                f"global_camera_source={global_camera_source}, wrist_camera_source={wrist_camera_source}, "
-                f"preview_global_topic={global_topic}, preview_wrist_topic={wrist_topic}"
+                f"global_camera_source={global_camera_source}, wrist_camera_source={wrist_camera_source}"
             )
 
             yaml_args = []
@@ -1320,24 +1419,19 @@ class TeleopMainWindow(QMainWindow):
                 return
 
             self._set_button_running(self.btn_collector, True, "启动采集节点", "停止采集节点", "background-color: lightgreen;")
-            self.start_ros_worker(global_topic, wrist_topic)
+            self.start_ros_worker()
+            self._sync_preview_pipeline()
         else:
             self.kill_subprocess("data_collector")
             self._set_button_running(self.btn_collector, False, "启动采集节点", "停止采集节点")
             self._stop_ros_worker_if_unused()
 
-    def start_ros_worker(self, global_topic, wrist_topic):
+    def start_ros_worker(self):
         if self.ros_worker is None:
             self.ros_worker = ROS2Worker(
-                global_topic,
-                wrist_topic,
                 self.COLLECTOR_POSE_TOPIC,
                 self.COLLECTOR_GRIPPER_TOPIC,
                 self.COLLECTOR_ACTION_TOPIC,
-            )
-            self.ros_worker.set_inference_preview_topics(
-                self.INFERENCE_PREVIEW_GLOBAL_TOPIC,
-                self.INFERENCE_PREVIEW_WRIST_TOPIC,
             )
             self.ros_worker.log_signal.connect(self.log)
             self.ros_worker.demo_status_signal.connect(self.update_demo_status)
@@ -1346,8 +1440,6 @@ class TeleopMainWindow(QMainWindow):
             self._sync_ros_worker_inference_control_config()
 
             if self.preview_window:
-                self.ros_worker.global_image_signal.connect(self.preview_window.update_global_image)
-                self.ros_worker.wrist_image_signal.connect(self.preview_window.update_wrist_image)
                 self.ros_worker.robot_state_str_signal.connect(self.preview_window.update_robot_state_str)
                 self.ros_worker.record_stats_signal.connect(self.preview_window.update_record_stats)
 
@@ -1356,7 +1448,6 @@ class TeleopMainWindow(QMainWindow):
 
         self._sync_ros_worker_home_config()
         self._sync_ros_worker_inference_control_config()
-        self.ros_worker.set_image_topics(global_topic, wrist_topic)
 
     def toggle_inference(self, checked) -> None:
         if checked:
@@ -1431,11 +1522,9 @@ class TeleopMainWindow(QMainWindow):
             self.inference_worker.log_signal.connect(self.log)
             self.inference_worker.error_signal.connect(self._on_inference_error)
             self.inference_worker.finished.connect(self._on_inference_finished)
-            if self.ros_worker is not None:
-                self.ros_worker.set_inference_preview_enabled(True)
-                self.ros_worker.clear_inference_preview_frames()
-            self._sync_preview_topics()
+            self._clear_inference_preview_frames()
             self.inference_worker.start()
+            self._sync_preview_pipeline()
 
             self.inference_action_output.setPlainText("")
             self._set_inference_button_running(True)
@@ -1509,9 +1598,7 @@ class TeleopMainWindow(QMainWindow):
         worker.stop()
         if not worker.wait(4000):
             self.log("推理线程未在 4s 内退出，继续等待资源回收。")
-        if self.ros_worker is not None:
-            self.ros_worker.set_inference_preview_enabled(False)
-            self.ros_worker.clear_inference_preview_frames()
+        self._clear_inference_preview_frames()
         self._set_inference_button_running(False)
         self._set_inference_status("未启动", "#6c757d")
         self._set_inference_execute_button_running(False)
@@ -1519,7 +1606,7 @@ class TeleopMainWindow(QMainWindow):
         self.btn_execute_inference.setEnabled(False)
         self.btn_inference_estop.setEnabled(False)
         self._refresh_runtime_status()
-        self._sync_preview_topics()
+        self._sync_preview_pipeline()
         self._stop_ros_worker_if_unused()
 
     @Slot(object)
@@ -1531,9 +1618,8 @@ class TeleopMainWindow(QMainWindow):
 
     @Slot(object, object)
     def update_inference_preview(self, global_bgr, wrist_bgr) -> None:
-        if self.ros_worker is None:
-            return
-        self.ros_worker.update_inference_preview_frames(global_bgr, wrist_bgr)
+        self._cache_inference_preview_frames(global_bgr, wrist_bgr)
+        self._render_inference_preview_frames()
 
     @Slot(str)
     def update_inference_status(self, status: str) -> None:
@@ -1546,6 +1632,7 @@ class TeleopMainWindow(QMainWindow):
         controls_ready = self._inference_running() and (status.startswith("运行中") or status == "相机已就绪")
         self.btn_execute_inference.setEnabled(controls_ready)
         self.btn_inference_estop.setEnabled(self._inference_running())
+        self._sync_preview_pipeline()
         self._refresh_runtime_status()
 
     @Slot(str)
@@ -1554,23 +1641,21 @@ class TeleopMainWindow(QMainWindow):
         self.inference_action_output.setPlainText("推理失败，详见下方日志输出。")
         if self.ros_worker is not None:
             self.ros_worker.emergency_stop_inference()
-            self.ros_worker.set_inference_preview_enabled(False)
-            self.ros_worker.clear_inference_preview_frames()
+        self._clear_inference_preview_frames()
         self._set_inference_status("错误，详见日志", "#c92a2a")
         self._set_inference_execute_button_running(False)
         self._set_inference_execute_status("已急停", "#c92a2a")
         self.btn_execute_inference.setEnabled(False)
         self.btn_inference_estop.setEnabled(False)
         self._refresh_runtime_status()
-        self._sync_preview_topics()
+        self._sync_preview_pipeline()
 
     @Slot()
     def _on_inference_finished(self) -> None:
         self.inference_worker = None
         if self.ros_worker is not None:
             self.ros_worker.set_inference_execution_enabled(False)
-            self.ros_worker.set_inference_preview_enabled(False)
-            self.ros_worker.clear_inference_preview_frames()
+        self._clear_inference_preview_frames()
         self._set_inference_button_running(False)
         self._set_inference_execute_button_running(False)
         if self.lbl_inference_execute_status.text() != "已急停":
@@ -1580,7 +1665,7 @@ class TeleopMainWindow(QMainWindow):
         if self.lbl_inference_status.text() != "错误，详见日志":
             self._set_inference_status("未启动", "#6c757d")
         self._refresh_runtime_status()
-        self._sync_preview_topics()
+        self._sync_preview_pipeline()
         self._stop_ros_worker_if_unused()
 
     def start_record(self):
@@ -1662,31 +1747,29 @@ class TeleopMainWindow(QMainWindow):
 
     @Slot(int)
     def _on_preview_window_finished(self, _result: int):
-        if self.ros_worker is not None:
-            self.ros_worker.enable_image_processing = False
+        self._stop_preview_api_worker()
+        if self.preview_window is not None:
+            self.preview_window.set_preview_source("已关闭")
+            self.preview_window.clear_images()
         self._stop_ros_worker_if_unused()
 
     def open_preview_window(self):
         if self.ros_worker is None:
-            self.start_ros_worker(self._preview_global_topic(), self._preview_wrist_topic())
-            self.log("已启动独立 ROS 监听器，默认等待 data_collector 预览话题。")
-
-        self.ros_worker.set_image_topics(self._preview_global_topic(), self._preview_wrist_topic())
+            self.start_ros_worker()
+            self.log("已启动独立 ROS 监听器，用于状态与录制信息同步。")
 
         if self.preview_window is None:
             self.preview_window = CameraPreviewWindow(self)
             self.preview_window.finished.connect(self._on_preview_window_finished)
-            self.ros_worker.global_image_signal.connect(self.preview_window.update_global_image)
-            self.ros_worker.wrist_image_signal.connect(self.preview_window.update_wrist_image)
             self.ros_worker.robot_state_str_signal.connect(self.preview_window.update_robot_state_str)
             self.ros_worker.record_stats_signal.connect(self.preview_window.update_record_stats)
             if not self.ros_worker.is_recording:
                 self.preview_window.reset_record_stats()
 
-        self.ros_worker.enable_image_processing = True
         self.preview_window.show()
         self.preview_window.raise_()
         self.preview_window.activateWindow()
+        self._sync_preview_pipeline()
 
     def open_hdf5_viewer(self):
         if self.ros_worker and self.ros_worker.is_recording:

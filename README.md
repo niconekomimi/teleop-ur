@@ -20,7 +20,7 @@
 colcon build --packages-select teleop_control_py
 source install/setup.bash
 ```
-
+·
 然后启动 GUI：
 
 ```bash

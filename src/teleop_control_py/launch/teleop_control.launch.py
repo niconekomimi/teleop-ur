@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os
+import subprocess
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
@@ -10,14 +11,51 @@ from launch.actions import OpaqueFunction
 from launch.substitutions import LaunchConfiguration
 
 
+def _python_supports_modules(candidate: str, modules: tuple[str, ...]) -> bool:
+    try:
+        result = subprocess.run(
+            [
+                candidate,
+                "-c",
+                (
+                    "import importlib.util, sys; "
+                    "mods = sys.argv[1:]; "
+                    "missing = [m for m in mods if importlib.util.find_spec(m) is None]; "
+                    "raise SystemExit(0 if not missing else 1)"
+                ),
+                *modules,
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=2.0,
+            check=False,
+        )
+    except Exception:
+        return False
+    return result.returncode == 0
+
+
 def _default_python_executable() -> str:
     # Prefer an activated venv/conda env if present; otherwise fall back to PATH lookup.
+    candidates: list[str] = []
     for prefix_var in ("VIRTUAL_ENV", "CONDA_PREFIX"):
         prefix = os.environ.get(prefix_var)
         if not prefix:
             continue
         candidate = os.path.join(prefix, "bin", "python3")
         if os.path.exists(candidate):
+            candidates.append(candidate)
+    home_candidate = os.path.expanduser("~/clds/bin/python3")
+    if os.path.exists(home_candidate):
+        candidates.append(home_candidate)
+    candidates.append("python3")
+
+    for candidate in candidates:
+        if _python_supports_modules(candidate, ("mediapipe", "pynput")):
+            return candidate
+
+    for candidate in candidates:
+        if candidate == "python3" or os.path.exists(candidate):
             return candidate
     return "python3"
 

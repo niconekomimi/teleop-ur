@@ -9,13 +9,14 @@ teleop_control_node:
     # robotiq | qbsofthand
     gripper_type: "robotiq"
 
-    control_hz: 50.0
+    control_hz: 60.0
 
     # ==========================================================
     # 2) 机械臂输出与运动限幅
     # ==========================================================
     target_frame_id: "base"
     servo_twist_topic: "/servo_node/delta_twist_cmds"
+    tool_pose_topic: "/tcp_pose_broadcaster/pose"
 
     auto_start_servo: true
     start_servo_service: "/servo_node/start_servo"
@@ -50,12 +51,12 @@ teleop_control_node:
     deadman_axis: 4
     deadman_axis_threshold: 0.5
 
-    # Z 方向仅使用左右扳机控制：RT 上升，LT 下降。
+    # Z 方向仅使用左右扳机控制：LT 上升，RT 下降。
     linear_x_axis: 0
     linear_y_axis: 1
     linear_z_axis: -1
-    linear_z_up_axis: 5
-    linear_z_down_axis: 4
+    linear_z_up_axis: 4
+    linear_z_down_axis: 5
     linear_axis_sign: [-1.0, -1.0, 1.0]
 
     angular_x_axis: 3
@@ -79,31 +80,39 @@ teleop_control_node:
     mediapipe_topic: ""
     mediapipe_depth_topic: "/camera/camera/aligned_depth_to_color/image_raw"
     mediapipe_camera_info_topic: "/camera/camera/aligned_depth_to_color/camera_info"
+    # velocity: 手势位移直接映射为速度；target_pose: 手势位移映射为目标位姿。
+    mediapipe_motion_mode: "target_pose"
     mediapipe_deadzone: 0.02
-    mediapipe_linear_scale: 1.0
+    mediapipe_linear_scale: 2.8
     mediapipe_angular_scale: 1.0
+    mediapipe_position_linear_gain: 7.0
+    mediapipe_position_angular_gain: 5.0
+    mediapipe_max_linear_vel: 2.8
+    mediapipe_max_angular_vel: 5.0
+    mediapipe_max_linear_accel: 10.0
+    mediapipe_max_angular_accel: 18.0
     mediapipe_linear_axis_mapping: [0, 1, 2]
     mediapipe_angular_axis_mapping: [0, 1, 2]
     mediapipe_linear_axis_sign: [1.0, 1.0, 1.0]
     mediapipe_angular_axis_sign: [1.0, 1.0, 1.0]
-    mediapipe_hand_position_source: "hybrid"
+    mediapipe_hand_position_source: "depth"
     mediapipe_orientation_mode: "lock"
     mediapipe_orientation_axis_mapping: [0, 1, 2]
     mediapipe_orientation_axis_sign: [1.0, 1.0, 1.0]
     mediapipe_depth_min_m: 0.1
     mediapipe_depth_max_m: 2.0
     mediapipe_depth_unit_scale: 0.001
-    mediapipe_smoothing_alpha: 0.2
+    mediapipe_smoothing_alpha: 0.45
     mediapipe_gripper_open_dist_px: 100.0
     mediapipe_gripper_close_dist_px: 20.0
-    mediapipe_gripper_open_dist_m: 0.12
+    mediapipe_gripper_open_dist_m: 0.10
     mediapipe_gripper_close_dist_m: 0.03
     mediapipe_gripper_metric_hold_sec: 0.25
     mediapipe_gripper_requires_deadman: true
     mediapipe_deadman_filter_enabled: true
     mediapipe_deadman_engage_confirm_sec: 0.10
     mediapipe_deadman_release_confirm_sec: 0.03
-    mediapipe_space_deadman_backend: "opencv"
+    mediapipe_space_deadman_backend: "pynput"
     mediapipe_space_deadman_hold_sec: 0.3
     mediapipe_show_debug_window: true
 
@@ -112,13 +121,19 @@ teleop_control_node:
     # ==========================================================
     gripper_cmd_topic: "/gripper/cmd"
     gripper_command_delta: 0.01
+    gripper_quantization_levels: 10
 
-    # confidence_topic: [-1, 1]，正数打开，负数闭合
-    # binary_topic: 1.0 打开，-1.0 闭合
-    robotiq_command_interface: "confidence_topic"
+    # position_action: 发送目标开口宽度（米），支持限制最大张开比例。
+    # confidence_topic / binary_topic: 兼容旧模式，只适合全开 / 全闭。
+    robotiq_command_interface: "position_action"
     robotiq_confidence_topic: "/robotiq_2f_gripper/confidence_command"
     robotiq_binary_topic: "/robotiq_2f_gripper/binary_command"
+    robotiq_action_name: "/robotiq_2f_gripper_action"
     robotiq_binary_threshold: 0.5
+    robotiq_open_ratio: 0.9
+    robotiq_max_open_position_m: 0.142
+    robotiq_target_speed: 1.0
+    robotiq_target_force: 0.5
 
     # 优先调用服务，/gripper/cmd 仍作为状态代理。
     qbsofthand_service_name: "/qbsofthand_control_node/set_closure"

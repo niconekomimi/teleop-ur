@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import pickle
 import sys
+import threading
 import time
 from collections import deque
 from functools import lru_cache
@@ -299,6 +300,8 @@ class InferenceWorker(QThread):
         self.device = str(device).strip() if device else None
         self.state_provider = state_provider
         self._running = True
+        self._task_update_lock = threading.Lock()
+        self._pending_task_update: Optional[tuple[str, str]] = None
 
     def info(self, message: str) -> None:
         self.log_signal.emit(str(message))
@@ -308,6 +311,39 @@ class InferenceWorker(QThread):
 
     def stop(self) -> None:
         self._running = False
+
+    def request_task_update(self, task_name: str, task_embedding_path: str) -> None:
+        normalized_task_name = str(task_name).strip()
+        normalized_embedding_path = str(Path(task_embedding_path).expanduser().resolve())
+        if not normalized_task_name or not normalized_embedding_path:
+            return
+
+        with self._task_update_lock:
+            self._pending_task_update = (normalized_task_name, normalized_embedding_path)
+
+    def _consume_pending_task_update(self, policy) -> None:
+        with self._task_update_lock:
+            pending_update = self._pending_task_update
+            self._pending_task_update = None
+
+        if pending_update is None:
+            return
+
+        task_name, task_embedding_path = pending_update
+        if task_name == self.task_name and task_embedding_path == self.task_embedding_path:
+            return
+
+        policy.set_task(
+            task_name=task_name,
+            task_embedding_path=task_embedding_path,
+        )
+        self.task_name = task_name
+        self.task_embedding_path = task_embedding_path
+        self.log_signal.emit(
+            "推理任务已切换: "
+            f"task={self.task_name}, embedding={self.task_embedding_path}"
+        )
+        self.status_signal.emit(f"任务已切换 | {self.task_name}")
 
     def _build_camera_client(self, source: str):
         RealSenseClient, OAKClient = _load_camera_client_classes()
@@ -422,6 +458,7 @@ class InferenceWorker(QThread):
                     next_cycle = time.perf_counter()
                     continue
 
+                self._consume_pending_task_update(policy)
                 self.preview_signal.emit(global_bgr, wrist_bgr)
                 agentview_rgb = center_crop_square_and_resize_rgb(global_bgr, agentview_size)
                 wrist_rgb = center_crop_square_and_resize_rgb(wrist_bgr, wrist_size)
