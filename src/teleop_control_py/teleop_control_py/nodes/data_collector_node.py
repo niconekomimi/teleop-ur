@@ -24,9 +24,15 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import Float32, Float32MultiArray
 from std_srvs.srv import Trigger
 
-from ..data.hdf5_writer import Command, HDF5WriterThread, Sample
-from ..hardware.factory import HardwareFactory
-from ..preview_api import PreviewApiServer
+from ..core import CameraFrameSet, RecorderService, RobotStateSnapshot, SyncHub
+from ..data.hdf5_writer import Sample
+from ..device_manager import (
+    DEFAULT_ROBOT_PROFILE_NAME,
+    SharedMemoryCameraBackend,
+    default_robot_profiles_path,
+    load_robot_profile,
+)
+from ..data.preview_api import PreviewApiServer
 from ..utils.transform_utils import _clamp, center_crop_square_and_resize_rgb, compose_eef_action
 
 
@@ -46,31 +52,35 @@ class DataCollectorNode(Node):
     def __init__(self) -> None:
         super().__init__("data_collector")
 
+        self.declare_parameter("robot_profile", DEFAULT_ROBOT_PROFILE_NAME)
+        self.declare_parameter("robot_profiles_file", str(default_robot_profiles_path()))
+        self._robot_profile_name = str(self.get_parameter("robot_profile").value).strip() or DEFAULT_ROBOT_PROFILE_NAME
+        self._robot_profiles_file = str(self.get_parameter("robot_profiles_file").value).strip()
+        self._robot_profile = load_robot_profile(self._robot_profile_name, self._robot_profiles_file)
+        default_end_effector_type = (
+            "qbsofthand" if self._robot_profile.grippers.default_type == "qbsofthand" else "robotic_gripper"
+        )
+
         self.declare_parameter("output_path", os.path.join(os.getcwd(), "data", "libero_demos.hdf5"))
         self.declare_parameter("record_fps", 10.0)
         self.declare_parameter("global_camera_source", "realsense")
         self.declare_parameter("wrist_camera_source", "oakd")
         self.declare_parameter("global_camera_serial_number", "")
         self.declare_parameter("wrist_camera_serial_number", "")
-        self.declare_parameter("joint_states_topic", "/joint_states")
-        self.declare_parameter("tool_pose_topic", "/tcp_pose_broadcaster/pose")
-        self.declare_parameter("servo_twist_topic", "/servo_node/delta_twist_cmds")
+        self.declare_parameter("global_camera_enable_depth", False)
+        self.declare_parameter("wrist_camera_enable_depth", False)
+        self.declare_parameter("joint_states_topic", self._robot_profile.topics.joint_states)
+        self.declare_parameter("tool_pose_topic", self._robot_profile.topics.tool_pose)
+        self.declare_parameter("servo_twist_topic", self._robot_profile.topics.servo_twist)
         self.declare_parameter("require_gripper", True)
-        self.declare_parameter("end_effector_type", "robotic_gripper")
+        self.declare_parameter("end_effector_type", default_end_effector_type)
         self.declare_parameter("gripper_state_topic", "")
-        self.declare_parameter("robotic_gripper_state_topic", "/gripper/state")
-        self.declare_parameter("qbsofthand_state_topic", "/gripper/cmd")
+        self.declare_parameter("robotic_gripper_state_topic", self._robot_profile.grippers.robotiq.state_topic)
+        self.declare_parameter("qbsofthand_state_topic", self._robot_profile.grippers.qbsofthand.state_topic)
         self.declare_parameter("obs_image_size", 224)
         self.declare_parameter(
             "joint_names",
-            [
-                "shoulder_pan_joint",
-                "shoulder_lift_joint",
-                "elbow_joint",
-                "wrist_1_joint",
-                "wrist_2_joint",
-                "wrist_3_joint",
-            ],
+            list(self._robot_profile.joint_names),
         )
         self.declare_parameter("pose_max_age_sec", 0.2)
         self.declare_parameter("joint_max_age_sec", 0.2)
@@ -160,27 +170,39 @@ class DataCollectorNode(Node):
         self._preview_timer = None
         self._preview_api_server: Optional[PreviewApiServer] = None
 
-        qmax = int(self.get_parameter("queue_maxsize").value)
-        self._queue: "queue.Queue[object]" = queue.Queue(maxsize=max(1, qmax))
-        self._writer = HDF5WriterThread(
+        self._recorder = RecorderService(
             output_path=self._output_path,
-            item_queue=self._queue,
             compression=self._image_compression,
+            queue_maxsize=int(self.get_parameter("queue_maxsize").value),
             batch_size=int(self.get_parameter("writer_batch_size").value),
             flush_every_n=int(self.get_parameter("writer_flush_every_n").value),
             logger=self.get_logger(),
         )
-        self._writer.start()
 
-        self._camera_instances: Dict[tuple[str, str], object] = {}
+        self._camera_instances: Dict[tuple[str, str, bool], object] = {}
         global_source = self._normalize_camera_source(self.get_parameter("global_camera_source").value)
         wrist_source = self._normalize_camera_source(self.get_parameter("wrist_camera_source").value)
         self._global_camera_serial_number = str(self.get_parameter("global_camera_serial_number").value).strip()
         self._wrist_camera_serial_number = str(self.get_parameter("wrist_camera_serial_number").value).strip()
-        self.global_cam = self._get_or_create_camera(global_source, self._global_camera_serial_number)
-        self.wrist_cam = self._get_or_create_camera(wrist_source, self._wrist_camera_serial_number)
+        self._global_camera_enable_depth = bool(self.get_parameter("global_camera_enable_depth").value)
+        self._wrist_camera_enable_depth = bool(self.get_parameter("wrist_camera_enable_depth").value)
+        self.global_cam = self._get_or_create_camera(
+            global_source,
+            self._global_camera_serial_number,
+            enable_depth=self._global_camera_enable_depth,
+        )
+        self.wrist_cam = self._get_or_create_camera(
+            wrist_source,
+            self._wrist_camera_serial_number,
+            enable_depth=self._wrist_camera_enable_depth,
+        )
         self._global_camera_source = global_source
         self._wrist_camera_source = wrist_source
+        self._sync_hub = SyncHub(
+            camera_provider=self._select_record_camera_frame_set,
+            state_provider=self._sync_state_provider,
+            action_provider=self._sync_action_provider,
+        )
 
         joint_topic = str(self.get_parameter("joint_states_topic").value)
         pose_topic = str(self.get_parameter("tool_pose_topic").value)
@@ -214,6 +236,7 @@ class DataCollectorNode(Node):
 
         self._srv_start = self.create_service(Trigger, "~/start", self._srv_start_cb)
         self._srv_stop = self.create_service(Trigger, "~/stop", self._srv_stop_cb)
+        self._srv_discard_last_demo = self.create_service(Trigger, "~/discard_last_demo", self._srv_discard_last_demo_cb)
 
         if bool(self.get_parameter("enable_keyboard").value):
             self._keyboard_thread = threading.Thread(target=self._keyboard_loop, daemon=True)
@@ -224,14 +247,19 @@ class DataCollectorNode(Node):
             self._stats_timer = self.create_timer(period, self._log_stats)
 
         self.get_logger().info(
-            "DataCollectorNode ready. Services: ~/start, ~/stop. "
-            f"Global camera={self._global_camera_source}, Wrist camera={self._wrist_camera_source}, "
-            f"Gripper={gripper_topic}, Output={self._output_path}, FPS={self._record_fps:.2f}, "
-            f"Global SN={self._global_camera_serial_number or 'auto'}, Wrist SN={self._wrist_camera_serial_number or 'auto'}"
+            "DataCollectorNode ready. Services: ~/start, ~/stop, ~/discard_last_demo. "
+            f"robot_profile={self._robot_profile.name}, Global camera={self._global_camera_source}, "
+            f"Wrist camera={self._wrist_camera_source}, Gripper={gripper_topic}, Output={self._output_path}, "
+            f"FPS={self._record_fps:.2f}, Global SN={self._global_camera_serial_number or 'auto'}, "
+            f"Wrist SN={self._wrist_camera_serial_number or 'auto'}, "
+            f"Global depth={self._global_camera_enable_depth}, "
+            f"Wrist depth={self._wrist_camera_enable_depth}"
         )
 
-        if self._demo_index > 0:
-            self.get_logger().info(f"Detected existing demos in HDF5. Next demo index: {self._demo_index}")
+        if self._recorder.next_demo_index > 0:
+            self.get_logger().info(
+                f"Detected existing demos in HDF5. Next demo index: {self._recorder.next_demo_index}"
+            )
 
         if self._preview_api_enabled:
             self.get_logger().info(
@@ -246,20 +274,28 @@ class DataCollectorNode(Node):
         self.get_logger().warn(f"未知相机来源 '{source}'，回退到 realsense。")
         return "realsense"
 
-    def _get_or_create_camera(self, source: str, serial_number: str = "") -> Optional[object]:
-        cache_key = (source, str(serial_number).strip())
+    def _get_or_create_camera(
+        self,
+        source: str,
+        serial_number: str = "",
+        *,
+        enable_depth: bool = False,
+    ) -> Optional[object]:
+        cache_key = (source, str(serial_number).strip(), bool(enable_depth))
         if cache_key in self._camera_instances:
             return self._camera_instances[cache_key]
 
         try:
-            camera = HardwareFactory.create_camera(
+            camera = SharedMemoryCameraBackend.create(
                 source,
                 serial_number=serial_number,
+                enable_depth=enable_depth,
                 logger=self.get_logger(),
             )
         except Exception as exc:  # noqa: BLE001
             self.get_logger().error(
-                f"初始化 {source} 相机失败 (serial={serial_number or 'auto'}): {exc!r}"
+                "初始化 "
+                f"{source} 相机失败 (serial={serial_number or 'auto'}, depth={enable_depth}): {exc!r}"
             )
             camera = None
 
@@ -324,10 +360,7 @@ class DataCollectorNode(Node):
         if not stats:
             return
 
-        try:
-            qsize = self._queue.qsize()
-        except Exception:
-            qsize = -1
+        qsize = self._recorder.queue_size()
 
         ordered = ", ".join(f"{key}={value}" for key, value in sorted(stats.items()))
         self.get_logger().info(f"Recorder stats: {ordered} | queue={qsize}")
@@ -613,6 +646,64 @@ class DataCollectorNode(Node):
 
         return frame_pair
 
+    def _camera_frame_pair_to_frame_set(self, frame_pair: CameraFramePair) -> CameraFrameSet:
+        return CameraFrameSet(
+            global_bgr=frame_pair.global_bgr,
+            wrist_bgr=frame_pair.wrist_bgr,
+            global_time_ns=frame_pair.global_time.nanoseconds,
+            wrist_time_ns=frame_pair.wrist_time.nanoseconds,
+            ref_time_ns=frame_pair.ref_time.nanoseconds,
+            skew_sec=float(frame_pair.skew_sec),
+            ref_context=frame_pair.ref_time,
+        )
+
+    def _select_record_camera_frame_set(self) -> Optional[CameraFrameSet]:
+        frame_pair = self._select_record_camera_frames()
+        if frame_pair is None:
+            return None
+        return self._camera_frame_pair_to_frame_set(frame_pair)
+
+    def _sync_state_provider(
+        self,
+        frame_set: CameraFrameSet,
+    ) -> Tuple[Optional[RobotStateSnapshot], Optional[str], Optional[str]]:
+        ref_time = frame_set.ref_context
+        if not isinstance(ref_time, Time):
+            return None, "invalid_ref_time", "采样参考时间无效。"
+
+        cached, reason, detail = self._get_cached_state(ref_time)
+        if cached is None:
+            return None, reason, detail
+
+        joint_pos, eef_pos, eef_quat, gripper = cached
+        with self._cache_lock:
+            twist_linear = None if self._latest_twist_linear is None else self._latest_twist_linear.copy()
+            twist_angular = None if self._latest_twist_angular is None else self._latest_twist_angular.copy()
+
+        return (
+            RobotStateSnapshot(
+                joint_pos=joint_pos,
+                eef_pos=eef_pos,
+                eef_quat=eef_quat,
+                gripper=gripper,
+                twist_linear=twist_linear,
+                twist_angular=twist_angular,
+                ref_context={"ref_time": ref_time},
+            ),
+            None,
+            None,
+        )
+
+    def _sync_action_provider(
+        self,
+        frame_set: CameraFrameSet,
+        state: RobotStateSnapshot,
+    ) -> Tuple[Optional[np.ndarray], Optional[str], Optional[str]]:
+        ref_time = frame_set.ref_context
+        if not isinstance(ref_time, Time):
+            return None, "invalid_ref_time", "采样参考时间无效。"
+        return self._get_cached_action(ref_time, state.gripper)
+
     def _capture_step(self) -> None:
         with self._record_lock:
             if not self._recording or self._current_demo_name is None:
@@ -626,30 +717,18 @@ class DataCollectorNode(Node):
             return
 
         try:
-            frame_pair = self._select_record_camera_frames()
+            snapshot, reason, detail = self._sync_hub.capture_snapshot()
         except Exception as exc:  # noqa: BLE001
-            self._warn_throttled("camera_pull", f"主动拉取相机图像失败: {exc!r}")
-            self._inc_stat("camera_pull_fail")
+            self._warn_throttled("snapshot_fail", f"采样快照失败: {exc!r}")
+            self._inc_stat("snapshot_fail")
             return
 
-        if frame_pair is None:
-            self._inc_stat("camera_empty")
-            return
-
-        if self._camera_pair_max_skew > 0.0 and frame_pair.skew_sec > self._camera_pair_max_skew:
-            self._inc_stat("camera_skew")
-            self._warn_throttled(
-                "camera_skew",
-                f"双相机时间偏差过大，当前帧跳过: skew={frame_pair.skew_sec:.3f}s。",
-            )
-            return
-
-        ref_time = frame_pair.ref_time
-        cached, reason, detail = self._get_cached_state(ref_time)
-        if cached is None:
-            reason = reason or "missing_state"
+        if snapshot is None:
+            reason = reason or "snapshot_missing"
             self._inc_stat(reason)
-            if reason == "no_joint":
+            if reason == "camera_empty":
+                self._warn_throttled("camera_empty", "尚未获取到双相机有效图像，当前帧跳过。")
+            elif reason == "no_joint":
                 self._warn_throttled("no_joint", "尚未收到有效 /joint_states，当前帧跳过。")
             elif reason == "joint_stale":
                 self._warn_throttled("joint_stale", detail or "joint_states 过旧，当前帧跳过。")
@@ -661,40 +740,47 @@ class DataCollectorNode(Node):
                 self._warn_throttled("no_gripper", "尚未收到夹爪状态，当前帧跳过。")
             elif reason == "gripper_stale":
                 self._warn_throttled("gripper_stale", "夹爪状态过旧，当前帧跳过。")
+            elif reason in {"no_action_cmd", "action_cmd_stale"}:
+                self._warn_throttled(reason, detail or "动作命令缺失，当前帧跳过。")
+            else:
+                self._warn_throttled(reason, detail or f"采样快照失败: {reason}")
             return
 
-        joint_pos, eef_pos, eef_quat, gripper = cached
+        frame_set = snapshot.camera_frames
+        if self._camera_pair_max_skew > 0.0 and frame_set.skew_sec > self._camera_pair_max_skew:
+            self._inc_stat("camera_skew")
+            self._warn_throttled(
+                "camera_skew",
+                f"双相机时间偏差过大，当前帧跳过: skew={frame_set.skew_sec:.3f}s。",
+            )
+            return
 
         try:
-            agentview_rgb = center_crop_square_and_resize_rgb(frame_pair.global_bgr, self._obs_image_size)
-            eye_in_hand_rgb = center_crop_square_and_resize_rgb(frame_pair.wrist_bgr, self._obs_image_size)
+            agentview_rgb = center_crop_square_and_resize_rgb(frame_set.global_bgr, self._obs_image_size)
+            eye_in_hand_rgb = center_crop_square_and_resize_rgb(frame_set.wrist_bgr, self._obs_image_size)
         except Exception as exc:  # noqa: BLE001
             self._warn_throttled("image_fail", f"图像预处理失败: {exc!r}")
             self._inc_stat("image_fail")
             return
 
-        action, action_reason, action_detail = self._get_cached_action(ref_time, gripper)
-        if action is None:
-            action_reason = action_reason or "action_missing"
-            self._inc_stat(action_reason)
-            self._warn_throttled(action_reason, action_detail or "动作命令缺失，当前帧跳过。")
+        if snapshot.action_vector is None:
+            self._warn_throttled("action_missing", "动作命令缺失，当前帧跳过。")
+            self._inc_stat("action_missing")
             return
 
-        # 严格按照相机角色写入数据集字段，避免 agentview / wrist 对调。
+        robot_state = snapshot.robot_state
         sample = Sample(
             demo_name=demo_name,
             agentview_rgb=agentview_rgb,
             eye_in_hand_rgb=eye_in_hand_rgb,
-            robot0_joint_pos=joint_pos.astype(np.float32, copy=False),
-            robot0_gripper_qpos=np.array([gripper], dtype=np.float32),
-            robot0_eef_pos=eef_pos.astype(np.float32, copy=False),
-            robot0_eef_quat=eef_quat.astype(np.float32, copy=False),
-            actions=action,
+            robot0_joint_pos=robot_state.joint_pos.astype(np.float32, copy=False),
+            robot0_gripper_qpos=np.array([robot_state.gripper], dtype=np.float32),
+            robot0_eef_pos=robot_state.eef_pos.astype(np.float32, copy=False),
+            robot0_eef_quat=robot_state.eef_quat.astype(np.float32, copy=False),
+            actions=snapshot.action_vector.astype(np.float32, copy=False),
         )
 
-        try:
-            self._queue.put_nowait(sample)
-        except queue.Full:
+        if not self._recorder.enqueue_sample(sample):
             self._warn_throttled("queue_full", "写盘队列已满，当前样本被丢弃。")
             self._inc_stat("queue_full")
             return
@@ -720,14 +806,10 @@ class DataCollectorNode(Node):
                 res.message = "Camera client is not available"
                 return res
 
-            demo_name = f"demo_{self._demo_index}"
-            self._demo_index += 1
-
-            try:
-                self._queue.put_nowait(Command(kind="start_demo", demo_name=demo_name))
-            except queue.Full:
+            success, message, demo_name = self._recorder.start_demo()
+            if not success or demo_name is None:
                 res.success = False
-                res.message = "Queue full; cannot start demo"
+                res.message = message
                 return res
 
             self._reset_stats()
@@ -747,7 +829,7 @@ class DataCollectorNode(Node):
         self._publish_record_stats()
 
         res.success = True
-        res.message = f"Started recording {demo_name} at {self._record_fps:.2f} Hz"
+        res.message = f"{message} at {self._record_fps:.2f} Hz"
         self.get_logger().info(res.message)
         return res
 
@@ -758,7 +840,6 @@ class DataCollectorNode(Node):
                 res.message = "Not recording"
                 return res
 
-            demo_name = self._current_demo_name
             self._recording = False
             self._current_demo_name = None
 
@@ -769,17 +850,41 @@ class DataCollectorNode(Node):
                     pass
                 self._capture_timer = None
 
-        try:
-            self._queue.put_nowait(Command(kind="stop_demo", demo_name=demo_name))
-        except queue.Full:
-            self.get_logger().warn("停止录制时队列已满，最终关闭时会尝试补齐元数据。")
+        success, message, _demo_name = self._recorder.stop_demo()
+        if not success:
+            res.success = False
+            res.message = message
+            return res
 
         with self._record_lock:
             self._recent_frame_times.clear()
         self._publish_record_stats()
 
         res.success = True
-        res.message = f"Stopped recording {demo_name}"
+        res.message = message
+        self.get_logger().info(res.message)
+        return res
+
+    def _srv_discard_last_demo_cb(self, _req: Trigger.Request, res: Trigger.Response) -> Trigger.Response:
+        with self._record_lock:
+            if self._recording:
+                res.success = False
+                res.message = "Cannot discard demo while recording"
+                return res
+
+        success, message, _demo_name = self._recorder.discard_last_demo()
+        if not success:
+            res.success = False
+            res.message = message
+            return res
+
+        with self._record_lock:
+            self._recent_frame_times.clear()
+            self._current_demo_frames = 0
+        self._publish_record_stats()
+
+        res.success = True
+        res.message = message
         self.get_logger().info(res.message)
         return res
 
@@ -836,12 +941,6 @@ class DataCollectorNode(Node):
                 self.get_logger().warn(f"停止 Preview API 失败: {exc!r}")
             self._preview_api_server = None
 
-        if active_demo is not None:
-            try:
-                self._queue.put_nowait(Command(kind="stop_demo", demo_name=active_demo))
-            except queue.Full:
-                pass
-
         for camera in {id(camera): camera for camera in self._camera_instances.values() if camera is not None}.values():
             try:
                 camera.stop()
@@ -849,8 +948,7 @@ class DataCollectorNode(Node):
                 self.get_logger().warn(f"关闭相机失败: {exc!r}")
 
         try:
-            self._writer.stop()
-            self._writer.join(timeout=3.0)
+            self._recorder.close()
         except Exception as exc:  # noqa: BLE001
             self.get_logger().warn(f"关闭 HDF5 写线程失败: {exc!r}")
 

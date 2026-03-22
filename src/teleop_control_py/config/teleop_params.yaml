@@ -1,5 +1,13 @@
+# teleop_control_node 行为层配置。
+# 这里只放“如何遥操作”的参数，不放底层机械臂 / 夹爪 ROS 接口真值。
+
 teleop_control_node:
   ros__parameters:
+    # ==========================================================
+    # 0) 画像绑定
+    # ==========================================================
+    robot_profile: "ur_servo_ur5"
+
     # ==========================================================
     # 1) 后端选择
     # ==========================================================
@@ -14,27 +22,23 @@ teleop_control_node:
     # ==========================================================
     # 2) 机械臂输出与运动限幅
     # ==========================================================
-    target_frame_id: "base"
-    servo_twist_topic: "/servo_node/delta_twist_cmds"
-    tool_pose_topic: "/tcp_pose_broadcaster/pose"
+    # 这里保留行为级开关和限幅。
+    # target_frame_id / servo_twist_topic / tool_pose_topic /
+    # start_servo_service / controller_manager_ns / controllers
+    # 默认统一来自 robot_profile。
 
     auto_start_servo: true
-    start_servo_service: "/servo_node/start_servo"
-
     auto_switch_controllers: true
-    controller_manager_ns: "/controller_manager"
-    teleop_controller: "forward_position_controller"
-    trajectory_controller: "scaled_joint_trajectory_controller"
     startup_retry_period_sec: 1.0
 
     # 速度 / 加速度限幅。
-    max_linear_vel: 1.5
-    max_angular_vel: 3.0
+    max_linear_vel: 0.5
+    max_angular_vel: 1.0
     max_linear_accel: 4.0
     max_angular_accel: 8.0
     # 松手后回零时使用的加速度倍率。
     # 越小回零越慢、更柔和；越大回零越快。1.0 表示和正常加速同样快。
-    zero_return_accel_scale: 1.0
+    zero_return_accel_scale: 0.70
 
     # ==========================================================
     # 3) Joy 手柄输入
@@ -80,6 +84,10 @@ teleop_control_node:
     mediapipe_topic: ""
     mediapipe_depth_topic: "/camera/camera/aligned_depth_to_color/image_raw"
     mediapipe_camera_info_topic: "/camera/camera/aligned_depth_to_color/camera_info"
+    mediapipe_camera_driver: "realsense"
+    mediapipe_camera_serial_number: ""
+    mediapipe_enable_depth: false
+    mediapipe_use_sdk_camera: true
     # velocity: 手势位移直接映射为速度；target_pose: 手势位移映射为目标位姿。
     mediapipe_motion_mode: "target_pose"
     mediapipe_deadzone: 0.02
@@ -119,23 +127,6 @@ teleop_control_node:
     # ==========================================================
     # 5) 夹爪输出
     # ==========================================================
-    gripper_cmd_topic: "/gripper/cmd"
-    gripper_command_delta: 0.01
-    gripper_quantization_levels: 10
-
-    # position_action: 发送目标开口宽度（米），支持限制最大张开比例。
-    # confidence_topic / binary_topic: 兼容旧模式，只适合全开 / 全闭。
-    robotiq_command_interface: "position_action"
-    robotiq_confidence_topic: "/robotiq_2f_gripper/confidence_command"
-    robotiq_binary_topic: "/robotiq_2f_gripper/binary_command"
-    robotiq_action_name: "/robotiq_2f_gripper_action"
-    robotiq_binary_threshold: 0.5
-    robotiq_open_ratio: 0.9
-    robotiq_max_open_position_m: 0.142
-    robotiq_target_speed: 1.0
-    robotiq_target_force: 0.5
-
-    # 优先调用服务，/gripper/cmd 仍作为状态代理。
-    qbsofthand_service_name: "/qbsofthand_control_node/set_closure"
-    qbsofthand_duration_sec: 0.3
-    qbsofthand_speed_ratio: 1.0
+    # gripper_type 负责上层选择具体末端执行器。
+    # 详细接口默认值（command topic / action / service / quantization）
+    # 统一来自 robot_profile.grippers。

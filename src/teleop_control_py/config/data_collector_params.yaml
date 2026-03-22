@@ -1,5 +1,13 @@
+# data_collector_node 行为层配置。
+# 这里只放“如何采集与写盘”的参数，不放底层机械臂 / 夹爪 ROS 接口真值。
+
 data_collector:
   ros__parameters:
+    # ==========================================================
+    # 0) 画像绑定
+    # ==========================================================
+    robot_profile: "ur_servo_ur5"
+
     # ==========================================================
     # 1) 输出与采样
     # ==========================================================
@@ -16,23 +24,16 @@ data_collector:
     wrist_camera_source: "oakd"
     global_camera_serial_number: ""
     wrist_camera_serial_number: ""
+    # false: 默认只开 RGB；true: 启用 depth，并固定走对齐后的 RGBD 管道。
+    global_camera_enable_depth: false
+    wrist_camera_enable_depth: false
 
     # ==========================================================
     # 3) 机器人状态输入
     # ==========================================================
-    joint_states_topic: "/joint_states"
-
-    tool_pose_topic: "/tcp_pose_broadcaster/pose"
-    servo_twist_topic: "/servo_node/delta_twist_cmds"
-
-    # 必须与 /joint_states.name 中的关节名一致。
-    joint_names:
-      - shoulder_pan_joint
-      - shoulder_lift_joint
-      - elbow_joint
-      - wrist_1_joint
-      - wrist_2_joint
-      - wrist_3_joint
+    # 这里只保留采集侧的时间有效性约束。
+    # joint_states_topic / tool_pose_topic / servo_twist_topic /
+    # joint_names 默认统一来自 robot_profile。
 
     # ==========================================================
     # 4) 夹爪状态选择
@@ -43,8 +44,8 @@ data_collector:
     # 留空则按 end_effector_type 自动选择。
     gripper_state_topic: "/gripper/cmd"
 
-    robotic_gripper_state_topic: "/gripper/state"
-    qbsofthand_state_topic: "/gripper/cmd"
+    # 详细末端状态 topic 默认统一来自 robot_profile.grippers。
+    # gripper_state_topic 非空时，优先使用这里的覆盖值。
 
     # true: 丢帧；false: 缺失时回退为 0.0。
     require_gripper: false

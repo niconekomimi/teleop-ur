@@ -1,14 +1,28 @@
--i https://mirrors.aliyun.com/pypi/simple/
+# Python dependencies for this workspace.
+#
+# Scope:
+# - Source-mode GUI
+# - Teleop / collector helper scripts
+# - SDK camera access
+# - MediaPipe hand tracking
+#
+# Not included here:
+# - ROS 2 packages such as rclpy, cv_bridge, geometry_msgs, sensor_msgs, etc.
+# - Real_IL model dependencies (install separately with: pip install -r Real_IL/requirements.txt)
 
-pynput
-mediapipe==0.10.9
-depthai
-h5py
-transforms3d
+# Core runtime
 numpy<2.0
-opencv-contrib-python==4.5.5.64
-protobuf>=3.19,<4
-PySide6
-opencv-python
-pyyaml
+PyYAML>=6.0,<7.0
+h5py>=3.8,<4.0
+PySide6>=6.5,<7.0
+opencv-contrib-python>=4.8,<5.0
+
+# Input devices and hand tracking
+evdev>=1.6,<2.0
+mediapipe==0.10.9
+protobuf>=3.20,<4.0
+pynput>=1.7,<2.0
+
+# Camera SDK
+depthai>=2.24,<3.0
 pyrealsense2

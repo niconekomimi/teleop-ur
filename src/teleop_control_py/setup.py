@@ -13,10 +13,11 @@ setup(
         ("share/" + package_name + "/launch", [
             "launch/teleop_control.launch.py",
             "launch/control_system.launch.py",
+            "launch/joy_driver.launch.py",
         ]),
         ("share/" + package_name + "/config", glob("config/*.yaml")),
     ],
-    install_requires=["setuptools"],
+    install_requires=["setuptools", "evdev"],
     zip_safe=True,
     maintainer="rvl",
     maintainer_email="rvl@example.com",
@@ -27,7 +28,8 @@ setup(
         "console_scripts": [
             "teleop_control_node = teleop_control_py.nodes.teleop_control_node:main",
             "robot_commander_node = teleop_control_py.nodes.robot_commander_node:main",
-            "servo_pose_follower = teleop_control_py.hardware.servo_pose_follower:main",
+            "joy_driver_node = teleop_control_py.nodes.joy_driver_node:main",
+            "servo_pose_follower = teleop_control_py.hardware.control.servo_pose_follower:main",
             "data_collector_node = teleop_control_py.nodes.data_collector_node:main",
             "teleop_gui = teleop_control_py.gui.app:main",
         ],

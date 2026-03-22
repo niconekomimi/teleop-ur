@@ -1,0 +1,109 @@
+# 系统级底层画像真源。
+# 机械臂 / 夹爪 / ROS 接口 / controller / Home / Home Zone 的默认定义统一放这里。
+
+# ==========================================================
+# 1) 默认画像入口
+# ==========================================================
+default: ur_servo_ur5
+
+# ==========================================================
+# 2) 机器人画像列表
+# ==========================================================
+profiles:
+  ur_servo_ur5:
+    # ----------------------------------------------------------
+    # 2.1 基础识别
+    # ----------------------------------------------------------
+    backend: ur_servo
+    arm_model: ur5
+    target_frame_id: base
+
+    # ----------------------------------------------------------
+    # 2.2 关节定义
+    # ----------------------------------------------------------
+    joint_names:
+      - shoulder_pan_joint
+      - shoulder_lift_joint
+      - elbow_joint
+      - wrist_1_joint
+      - wrist_2_joint
+      - wrist_3_joint
+
+    # ----------------------------------------------------------
+    # 2.3 ROS topics
+    # ----------------------------------------------------------
+    topics:
+      joint_states: /joint_states
+      tool_pose: /tcp_pose_broadcaster/pose
+      servo_twist: /servo_node/delta_twist_cmds
+      gripper_state: /gripper/state
+      home_joint_trajectory: /scaled_joint_trajectory_controller/joint_trajectory
+
+    # ----------------------------------------------------------
+    # 2.4 ROS services
+    # ----------------------------------------------------------
+    services:
+      start_servo: /servo_node/start_servo
+      controller_manager_ns: /controller_manager
+
+    # ----------------------------------------------------------
+    # 2.5 控制器名称
+    # ----------------------------------------------------------
+    controllers:
+      teleop: forward_position_controller
+      trajectory: scaled_joint_trajectory_controller
+
+    # ----------------------------------------------------------
+    # 2.6 夹爪定义
+    # ----------------------------------------------------------
+    # default_type:
+    #   teleop / GUI / collector 在未显式覆盖时默认使用的末端类型。
+    # command_topic / command_delta / quantization_levels:
+    #   夹爪控制公共参数。
+    # robotiq / qbsofthand:
+    #   各自硬件接口默认值。
+    grippers:
+      default_type: robotiq
+      command_topic: /gripper/cmd
+      command_delta: 0.01
+      quantization_levels: 10
+      robotiq:
+        state_topic: /gripper/state
+        command_interface: position_action
+        confidence_topic: /robotiq_2f_gripper/confidence_command
+        binary_topic: /robotiq_2f_gripper/binary_command
+        action_name: /robotiq_2f_gripper_action
+        binary_threshold: 0.5
+        open_ratio: 0.9
+        max_open_position_m: 0.142
+        target_speed: 1.0
+        target_force: 0.5
+      qbsofthand:
+        state_topic: /gripper/cmd
+        service_name: /qbsofthand_control_node/set_closure
+        duration_sec: 0.3
+        speed_ratio: 1.0
+
+    # ----------------------------------------------------------
+    # 2.7 Home 点默认值
+    # ----------------------------------------------------------
+    home:
+      duration_sec: 3.0
+      joint_positions: [1.524178, -2.100060, 1.864580, -1.345048, -1.575888, 1.528195]
+
+    # ----------------------------------------------------------
+    # 2.8 Home Zone 默认值
+    # ----------------------------------------------------------
+    home_zone:
+      translation_min_m: [0.04, 0.04, 0.04]
+      translation_max_m: [0.08, 0.08, 0.08]
+      rotation_min_deg: [5.0, 5.0, 5.0]
+      rotation_max_deg: [10.0, 10.0, 10.0]
+      timeout_sec: 8.0
+      rate_hz: 120.0
+      max_linear_vel: 7.0
+      max_angular_vel: 9.0
+      linear_gain: 6.0
+      angular_gain: 7.0
+      position_tolerance_m: 0.01
+      rotation_tolerance_deg: 6.0

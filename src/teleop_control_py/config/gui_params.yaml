@@ -11,35 +11,33 @@ teleop_gui:
     - xbox
     - ps5
     - generic
-    default_mediapipe_input_topic: /camera/camera/color/image_raw
+    default_mediapipe_input_topic: /d435/camera/color/image_raw
+    default_mediapipe_camera: d435
+    default_mediapipe_camera_serial_number: '327122070172'
+    mediapipe_camera_options:
+    - d435
+    - d455
+    - oakd
+    - camera
+    realsense_d435_serial_number: ''
+    realsense_d455_serial_number: ''
+    default_collector_global_camera_model: d455
+    default_collector_global_camera_serial_number: '146222254305'
+    default_collector_wrist_camera_model: oakd
+    default_collector_wrist_camera_serial_number: ''
+    default_inference_global_camera_source: realsense
+    default_inference_global_camera_model: d455
+    default_inference_global_camera_serial_number: '146222254305'
+    default_inference_wrist_camera_source: oakd
+    default_inference_wrist_camera_model: oakd
+    default_inference_wrist_camera_serial_number: ''
     camera_driver_options:
     - realsense
     - oakd
     default_camera_driver: realsense
     default_global_camera_source: realsense
     default_wrist_camera_source: oakd
+    realsense_enable_depth: false
+    oakd_enable_depth: false
     default_hdf5_output_dir: /home/rvl/collect_datasets_ws/data
     default_hdf5_filename: libero_demos.hdf5
-    home_joint_positions:
-    - 1.4938936233520508
-    - -2.1434758345233362
-    - 1.7811594009399414
-    - -1.2176945845233362
-    - -1.5835722128497522
-    - 1.5020173788070679
-    home_zone_translation_min_m:
-    - 0.04
-    - 0.04
-    - 0.04
-    home_zone_translation_max_m:
-    - 0.08
-    - 0.08
-    - 0.08
-    home_zone_rotation_min_deg:
-    - 5.0
-    - 5.0
-    - 5.0
-    home_zone_rotation_max_deg:
-    - 10.0
-    - 10.0
-    - 10.0

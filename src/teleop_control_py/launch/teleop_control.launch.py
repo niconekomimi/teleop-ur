@@ -161,6 +161,20 @@ def _resolve_param_string(params_file: str, key: str, override: str, default: st
     return default
 
 
+def _as_bool(value: str, default: bool = False) -> bool:
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return bool(default)
+
+
+def _ros_string_literal(value: str) -> str:
+    escaped = str(value).replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
 def _resolve_mediapipe_input_topic(params_file: str, override: str) -> str:
     value = str(override).strip()
     if value:
@@ -176,6 +190,7 @@ def _resolve_mediapipe_input_topic(params_file: str, override: str) -> str:
 
 
 def _launch_teleop_node(context, *args, **kwargs):
+    resolved_robot_profile = str(LaunchConfiguration("robot_profile").perform(context)).strip() or "ur_servo_ur5"
     params_file = LaunchConfiguration("params_file").perform(context)
     resolved_input = _resolve_input_type(
         params_file,
@@ -191,11 +206,75 @@ def _launch_teleop_node(context, *args, **kwargs):
         params_file,
         LaunchConfiguration("mediapipe_input_topic").perform(context),
     )
+    resolved_mediapipe_depth_topic = _resolve_param_string(
+        params_file,
+        "mediapipe_depth_topic",
+        LaunchConfiguration("mediapipe_depth_topic").perform(context),
+        "/camera/camera/aligned_depth_to_color/image_raw",
+    )
+    resolved_mediapipe_camera_info_topic = _resolve_param_string(
+        params_file,
+        "mediapipe_camera_info_topic",
+        LaunchConfiguration("mediapipe_camera_info_topic").perform(context),
+        "/camera/camera/aligned_depth_to_color/camera_info",
+    )
+    resolved_mediapipe_camera_driver = _resolve_param_string(
+        params_file,
+        "mediapipe_camera_driver",
+        LaunchConfiguration("mediapipe_camera_driver").perform(context),
+        "realsense",
+    )
+    resolved_mediapipe_camera_serial_number = _resolve_param_string(
+        params_file,
+        "mediapipe_camera_serial_number",
+        LaunchConfiguration("mediapipe_camera_serial_number").perform(context),
+        "",
+    )
+    resolved_mediapipe_show_debug_window = _as_bool(
+        _resolve_param_string(
+            params_file,
+            "mediapipe_show_debug_window",
+            LaunchConfiguration("mediapipe_show_debug_window").perform(context),
+            "true",
+        ),
+        default=True,
+    )
+    resolved_mediapipe_enable_depth = _as_bool(
+        _resolve_param_string(
+            params_file,
+            "mediapipe_enable_depth",
+            LaunchConfiguration("mediapipe_enable_depth").perform(context),
+            "false",
+        ),
+        default=False,
+    )
+    resolved_mediapipe_use_sdk_camera = _as_bool(
+        _resolve_param_string(
+            params_file,
+            "mediapipe_use_sdk_camera",
+            LaunchConfiguration("mediapipe_use_sdk_camera").perform(context),
+            "true",
+        ),
+        default=True,
+    )
 
     return [
         LogInfo(msg=f"[teleop_control.launch] resolved input_type: {resolved_input}"),
         LogInfo(msg=f"[teleop_control.launch] resolved gripper_type: {resolved_gripper}"),
         LogInfo(msg=f"[teleop_control.launch] resolved mediapipe_input_topic: {resolved_mediapipe_input_topic}"),
+        LogInfo(msg=f"[teleop_control.launch] resolved mediapipe_depth_topic: {resolved_mediapipe_depth_topic}"),
+        LogInfo(msg=f"[teleop_control.launch] resolved mediapipe_camera_info_topic: {resolved_mediapipe_camera_info_topic}"),
+        LogInfo(msg=f"[teleop_control.launch] resolved mediapipe_camera_driver: {resolved_mediapipe_camera_driver}"),
+        LogInfo(
+            msg=(
+                "[teleop_control.launch] resolved mediapipe_camera_serial_number: "
+                f"{resolved_mediapipe_camera_serial_number or 'auto'}"
+            )
+        ),
+        LogInfo(msg=f"[teleop_control.launch] resolved mediapipe_enable_depth: {resolved_mediapipe_enable_depth}"),
+        LogInfo(msg=f"[teleop_control.launch] resolved mediapipe_show_debug_window: {resolved_mediapipe_show_debug_window}"),
+        LogInfo(msg=f"[teleop_control.launch] resolved mediapipe_use_sdk_camera: {resolved_mediapipe_use_sdk_camera}"),
+        LogInfo(msg=f"[teleop_control.launch] resolved robot_profile: {resolved_robot_profile}"),
         ExecuteProcess(
             name="teleop_control_node",
             cmd=[
@@ -212,7 +291,23 @@ def _launch_teleop_node(context, *args, **kwargs):
                 "-p",
                 f"gripper_type:={resolved_gripper}",
                 "-p",
+                f"robot_profile:={resolved_robot_profile}",
+                "-p",
                 f"mediapipe_input_topic:={resolved_mediapipe_input_topic}",
+                "-p",
+                f"mediapipe_depth_topic:={resolved_mediapipe_depth_topic}",
+                "-p",
+                f"mediapipe_camera_info_topic:={resolved_mediapipe_camera_info_topic}",
+                "-p",
+                f"mediapipe_camera_driver:={resolved_mediapipe_camera_driver}",
+                "-p",
+                f"mediapipe_camera_serial_number:={_ros_string_literal(resolved_mediapipe_camera_serial_number)}",
+                "-p",
+                f"mediapipe_enable_depth:={str(bool(resolved_mediapipe_enable_depth)).lower()}",
+                "-p",
+                f"mediapipe_show_debug_window:={str(bool(resolved_mediapipe_show_debug_window)).lower()}",
+                "-p",
+                f"mediapipe_use_sdk_camera:={str(bool(resolved_mediapipe_use_sdk_camera)).lower()}",
             ],
             output="screen",
         ),
@@ -266,6 +361,54 @@ def generate_launch_description():
         description="Optional MediaPipe image topic override.",
     )
 
+    mediapipe_depth_topic_arg = DeclareLaunchArgument(
+        "mediapipe_depth_topic",
+        default_value="",
+        description="Optional MediaPipe depth image topic override.",
+    )
+
+    mediapipe_camera_info_topic_arg = DeclareLaunchArgument(
+        "mediapipe_camera_info_topic",
+        default_value="",
+        description="Optional MediaPipe aligned camera_info topic override.",
+    )
+
+    mediapipe_camera_driver_arg = DeclareLaunchArgument(
+        "mediapipe_camera_driver",
+        default_value="",
+        description="Optional MediaPipe camera driver override (realsense|oakd).",
+    )
+
+    mediapipe_camera_serial_number_arg = DeclareLaunchArgument(
+        "mediapipe_camera_serial_number",
+        default_value="",
+        description="Optional MediaPipe camera serial number override.",
+    )
+
+    mediapipe_show_debug_window_arg = DeclareLaunchArgument(
+        "mediapipe_show_debug_window",
+        default_value="",
+        description="Optional MediaPipe debug window override (true|false).",
+    )
+
+    mediapipe_enable_depth_arg = DeclareLaunchArgument(
+        "mediapipe_enable_depth",
+        default_value="",
+        description="Optional MediaPipe SDK depth override (true|false).",
+    )
+
+    mediapipe_use_sdk_camera_arg = DeclareLaunchArgument(
+        "mediapipe_use_sdk_camera",
+        default_value="true",
+        description="Use SDK camera directly for MediaPipe input (true|false).",
+    )
+
+    robot_profile_arg = DeclareLaunchArgument(
+        "robot_profile",
+        default_value="ur_servo_ur5",
+        description="Backend-level robot profile name for teleop defaults.",
+    )
+
     return LaunchDescription(
         [
             params_file_arg,
@@ -275,6 +418,14 @@ def generate_launch_description():
             control_mode_arg,
             end_effector_arg,
             mediapipe_input_topic_arg,
+            mediapipe_depth_topic_arg,
+            mediapipe_camera_info_topic_arg,
+            mediapipe_camera_driver_arg,
+            mediapipe_camera_serial_number_arg,
+            mediapipe_show_debug_window_arg,
+            mediapipe_enable_depth_arg,
+            mediapipe_use_sdk_camera_arg,
+            robot_profile_arg,
             OpaqueFunction(function=_launch_teleop_node),
         ]
     )

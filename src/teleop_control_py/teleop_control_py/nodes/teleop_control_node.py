@@ -4,27 +4,39 @@
 from __future__ import annotations
 
 import time
-from typing import Optional
 
 import numpy as np
 import rclpy
-from geometry_msgs.msg import Twist
 from rclpy.node import Node
 from std_msgs.msg import Bool
-from std_srvs.srv import Trigger
 
-from ..hardware.gripper_controllers import QbSoftHandController, RobotiqController
-from ..hardware.input_handlers import JoyInputHandler, MediaPipeInputHandler
-from ..hardware.servo_pose_follower import ServoPoseFollower
+from ..core import ControlCoordinator, ControlSource
+from ..device_manager import (
+    ControllerGripperBackend,
+    DEFAULT_ROBOT_PROFILE_NAME,
+    InputHandlerBackend,
+    ServoArmBackend,
+    default_robot_profiles_path,
+    load_robot_profile,
+)
+from ..hardware.control.gripper_controllers import QbSoftHandController, RobotiqController
+from ..hardware.control.servo_pose_follower import ServoPoseFollower
+from ..hardware.input.input_handlers import JoyInputHandler, MediaPipeInputHandler
 from ..utils.transform_utils import apply_velocity_limits
 
 
 class TeleopControlNode(Node):
-    """主调度节点，遵循 DIP：只依赖抽象协议，不依赖具体设备细节。"""
+    """主调度节点，逐步迁移到新的核心骨架。"""
 
     def __init__(self) -> None:
         super().__init__("teleop_control_node")
-        self._declare_parameters()
+        self.declare_parameter("robot_profile", DEFAULT_ROBOT_PROFILE_NAME)
+        self.declare_parameter("robot_profiles_file", str(default_robot_profiles_path()))
+        self._robot_profile_name = str(self.get_parameter("robot_profile").value).strip() or DEFAULT_ROBOT_PROFILE_NAME
+        self._robot_profiles_file = str(self.get_parameter("robot_profiles_file").value).strip()
+        self._robot_profile = load_robot_profile(self._robot_profile_name, self._robot_profiles_file)
+
+        self._declare_parameters(self._robot_profile)
 
         self._input_type = str(self.get_parameter("input_type").value).strip().lower()
         self._gripper_type = str(self.get_parameter("gripper_type").value).strip().lower()
@@ -66,39 +78,52 @@ class TeleopControlNode(Node):
         self._last_twist_vec = np.zeros(6, dtype=np.float64)
         self._last_loop_time = time.monotonic()
         self._home_zone_active = False
-        self._home_zone_cancel_inflight = False
-        self._last_home_zone_cancel_monotonic = 0.0
 
         self.input_handler = self._build_input_handler(self._input_type)
         self.gripper_ctrl = self._build_gripper_controller(self._gripper_type)
         self.arm_ctrl = ServoPoseFollower(self)
+
+        self._input_backend = InputHandlerBackend(self.input_handler, source=ControlSource.TELEOP)
+        self._gripper_backend = ControllerGripperBackend(self.gripper_ctrl)
+        self._arm_backend = ServoArmBackend(self.arm_ctrl)
+        self._control_coordinator = ControlCoordinator(
+            self._arm_backend,
+            self._gripper_backend,
+            active_source=ControlSource.TELEOP,
+            logger=self.get_logger(),
+        )
+        self._control_coordinator.notify_teleop_started()
+
         self._home_zone_active_sub = self.create_subscription(
             Bool,
             "/commander/home_zone_active",
             self._on_home_zone_active,
             10,
         )
-        self._home_zone_cancel_client = self.create_client(Trigger, "/commander/cancel_home_zone")
 
         self._timer = self.create_timer(1.0 / self._control_hz, self._control_loop)
         self.get_logger().info(
-            f"TeleopControlNode ready. input_type={self._input_type}, gripper_type={self._gripper_type}, "
-            f"control_hz={self._control_hz:.1f}, zero_return_accel_scale={self._zero_return_accel_scale:.2f}"
+            f"TeleopControlNode ready. robot_profile={self._robot_profile.name}, input_type={self._input_type}, "
+            f"gripper_type={self._gripper_type}, control_hz={self._control_hz:.1f}, "
+            f"zero_return_accel_scale={self._zero_return_accel_scale:.2f}"
         )
 
-    def _declare_parameters(self) -> None:
+    def _declare_parameters(self, robot_profile) -> None:
+        grippers = robot_profile.grippers
+        robotiq = grippers.robotiq
+        qbsofthand = grippers.qbsofthand
         self.declare_parameter("input_type", "joy")
-        self.declare_parameter("gripper_type", "robotiq")
+        self.declare_parameter("gripper_type", grippers.default_type)
         self.declare_parameter("control_hz", 50.0)
-        self.declare_parameter("target_frame_id", "base")
-        self.declare_parameter("servo_twist_topic", "/servo_node/delta_twist_cmds")
-        self.declare_parameter("tool_pose_topic", "/tcp_pose_broadcaster/pose")
+        self.declare_parameter("target_frame_id", robot_profile.target_frame_id)
+        self.declare_parameter("servo_twist_topic", robot_profile.topics.servo_twist)
+        self.declare_parameter("tool_pose_topic", robot_profile.topics.tool_pose)
         self.declare_parameter("auto_start_servo", True)
-        self.declare_parameter("start_servo_service", "/servo_node/start_servo")
+        self.declare_parameter("start_servo_service", robot_profile.services.start_servo)
         self.declare_parameter("auto_switch_controllers", True)
-        self.declare_parameter("controller_manager_ns", "/controller_manager")
-        self.declare_parameter("teleop_controller", "forward_position_controller")
-        self.declare_parameter("trajectory_controller", "scaled_joint_trajectory_controller")
+        self.declare_parameter("controller_manager_ns", robot_profile.services.controller_manager_ns)
+        self.declare_parameter("teleop_controller", robot_profile.controllers.teleop)
+        self.declare_parameter("trajectory_controller", robot_profile.controllers.trajectory)
         self.declare_parameter("startup_retry_period_sec", 1.0)
         self.declare_parameter("max_linear_vel", 1.5)
         self.declare_parameter("max_angular_vel", 3.0)
@@ -137,6 +162,10 @@ class TeleopControlNode(Node):
         self.declare_parameter("mediapipe_topic", "")
         self.declare_parameter("mediapipe_depth_topic", "/camera/camera/aligned_depth_to_color/image_raw")
         self.declare_parameter("mediapipe_camera_info_topic", "/camera/camera/aligned_depth_to_color/camera_info")
+        self.declare_parameter("mediapipe_camera_driver", "realsense")
+        self.declare_parameter("mediapipe_camera_serial_number", "")
+        self.declare_parameter("mediapipe_enable_depth", False)
+        self.declare_parameter("mediapipe_use_sdk_camera", True)
         self.declare_parameter("mediapipe_motion_mode", "target_pose")
         self.declare_parameter("mediapipe_deadzone", 0.02)
         self.declare_parameter("mediapipe_linear_scale", 2.8)
@@ -172,21 +201,21 @@ class TeleopControlNode(Node):
         self.declare_parameter("mediapipe_space_deadman_hold_sec", 0.3)
         self.declare_parameter("mediapipe_show_debug_window", True)
 
-        self.declare_parameter("gripper_cmd_topic", "/gripper/cmd")
-        self.declare_parameter("gripper_command_delta", 0.01)
-        self.declare_parameter("gripper_quantization_levels", 10)
-        self.declare_parameter("robotiq_command_interface", "position_action")
-        self.declare_parameter("robotiq_confidence_topic", "/robotiq_2f_gripper/confidence_command")
-        self.declare_parameter("robotiq_binary_topic", "/robotiq_2f_gripper/binary_command")
-        self.declare_parameter("robotiq_action_name", "/robotiq_2f_gripper_action")
-        self.declare_parameter("robotiq_binary_threshold", 0.5)
-        self.declare_parameter("robotiq_open_ratio", 0.9)
-        self.declare_parameter("robotiq_max_open_position_m", 0.142)
-        self.declare_parameter("robotiq_target_speed", 1.0)
-        self.declare_parameter("robotiq_target_force", 0.5)
-        self.declare_parameter("qbsofthand_service_name", "/qbsofthand_control_node/set_closure")
-        self.declare_parameter("qbsofthand_duration_sec", 0.3)
-        self.declare_parameter("qbsofthand_speed_ratio", 1.0)
+        self.declare_parameter("gripper_cmd_topic", grippers.command_topic)
+        self.declare_parameter("gripper_command_delta", grippers.command_delta)
+        self.declare_parameter("gripper_quantization_levels", grippers.quantization_levels)
+        self.declare_parameter("robotiq_command_interface", robotiq.command_interface)
+        self.declare_parameter("robotiq_confidence_topic", robotiq.confidence_topic)
+        self.declare_parameter("robotiq_binary_topic", robotiq.binary_topic)
+        self.declare_parameter("robotiq_action_name", robotiq.action_name)
+        self.declare_parameter("robotiq_binary_threshold", robotiq.binary_threshold)
+        self.declare_parameter("robotiq_open_ratio", robotiq.open_ratio)
+        self.declare_parameter("robotiq_max_open_position_m", robotiq.max_open_position_m)
+        self.declare_parameter("robotiq_target_speed", robotiq.target_speed)
+        self.declare_parameter("robotiq_target_force", robotiq.target_force)
+        self.declare_parameter("qbsofthand_service_name", qbsofthand.service_name)
+        self.declare_parameter("qbsofthand_duration_sec", qbsofthand.duration_sec)
+        self.declare_parameter("qbsofthand_speed_ratio", qbsofthand.speed_ratio)
 
     def _build_input_handler(self, input_type: str):
         strategies = {
@@ -210,81 +239,39 @@ class TeleopControlNode(Node):
             controller_cls = RobotiqController
         return controller_cls(self)
 
-    def _twist_to_vector(self, twist: Twist) -> np.ndarray:
-        return np.array(
-            [
-                twist.linear.x,
-                twist.linear.y,
-                twist.linear.z,
-                twist.angular.x,
-                twist.angular.y,
-                twist.angular.z,
-            ],
-            dtype=np.float64,
-        )
-
-    def _vector_to_twist(self, values: np.ndarray) -> Twist:
-        twist = Twist()
-        twist.linear.x = float(values[0])
-        twist.linear.y = float(values[1])
-        twist.linear.z = float(values[2])
-        twist.angular.x = float(values[3])
-        twist.angular.y = float(values[4])
-        twist.angular.z = float(values[5])
-        return twist
-
     def _on_home_zone_active(self, msg: Bool) -> None:
         active = bool(msg.data)
         if active == self._home_zone_active:
             return
+
         self._home_zone_active = active
+        self._last_twist_vec = np.zeros(6, dtype=np.float64)
+        self._control_coordinator.notify_home_zone(active)
+
         if active:
-            self._last_twist_vec = np.zeros(6, dtype=np.float64)
-            self.get_logger().info("Home Zone active. Teleop output paused until Home Zone finishes or is canceled.")
+            self.get_logger().info("Home Zone active. Teleop output paused until Home Zone finishes.")
         else:
             self.get_logger().info("Home Zone inactive. Teleop output resumed.")
 
-    def _on_home_zone_cancel_done(self, future) -> None:
-        self._home_zone_cancel_inflight = False
-        try:
-            future.result()
-        except Exception:
-            pass
-
     def cancel_gripper_motion(self) -> None:
-        try:
-            self.gripper_ctrl.cancel_motion()
-        except Exception:
-            pass
-
-    def _maybe_cancel_home_zone_for_operator_input(self, target_vec: np.ndarray) -> None:
-        if not self._home_zone_active:
-            return
-        if float(np.max(np.abs(target_vec))) <= 1e-3:
-            return
-        if self._home_zone_cancel_inflight:
-            return
-        now = time.monotonic()
-        if (now - self._last_home_zone_cancel_monotonic) < 0.5:
-            return
-        if not self._home_zone_cancel_client.wait_for_service(timeout_sec=0.0):
-            return
-        self._last_home_zone_cancel_monotonic = now
-        self._home_zone_cancel_inflight = True
-        future = self._home_zone_cancel_client.call_async(Trigger.Request())
-        future.add_done_callback(self._on_home_zone_cancel_done)
+        cancel_fn = getattr(self._gripper_backend, "cancel_motion", None)
+        if callable(cancel_fn):
+            try:
+                cancel_fn()
+            except Exception:
+                pass
 
     def _control_loop(self) -> None:
-        twist, gripper_val = self.input_handler.get_command()
+        command = self._input_backend.get_action_command()
         now = time.monotonic()
         dt = max(1e-4, now - self._last_loop_time)
         self._last_loop_time = now
 
-        target_vec = self._twist_to_vector(twist)
+        target_vec = command.twist_vector()
         if self._home_zone_active:
             self._last_twist_vec = np.zeros(6, dtype=np.float64)
-            self._maybe_cancel_home_zone_for_operator_input(target_vec)
             return
+
         effective_acceleration = self._max_acceleration.copy()
         zero_axes = np.isclose(target_vec, 0.0, atol=1e-6)
         effective_acceleration[zero_axes] *= self._zero_return_accel_scale
@@ -297,23 +284,16 @@ class TeleopControlNode(Node):
         )
         self._last_twist_vec = limited_vec
 
-        limited_twist = self._vector_to_twist(limited_vec)
-        self.arm_ctrl.send_twist(limited_twist)
-        self.gripper_ctrl.set_gripper(gripper_val)
+        dispatch_result = self._control_coordinator.dispatch(command.with_twist_vector(limited_vec))
+        if not dispatch_result.accepted:
+            self.get_logger().debug(f"Teleop action dropped by mux: {dispatch_result.reason}")
 
     def destroy_node(self) -> bool:  # type: ignore[override]
-        try:
-            self.input_handler.stop()
-        except Exception:
-            pass
-        try:
-            self.arm_ctrl.stop()
-        except Exception:
-            pass
-        try:
-            self.gripper_ctrl.stop()
-        except Exception:
-            pass
+        for backend in (self._input_backend, self._arm_backend, self._gripper_backend):
+            try:
+                backend.stop()
+            except Exception:
+                pass
         return super().destroy_node()
 
 

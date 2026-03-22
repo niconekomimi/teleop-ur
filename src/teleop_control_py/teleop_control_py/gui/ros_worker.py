@@ -12,11 +12,18 @@ from rclpy.node import Node
 from rclpy.parameter import Parameter
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Float32, Float32MultiArray
+from std_msgs.msg import Bool, Float32, Float32MultiArray, String
 from std_srvs.srv import Trigger
 
-from ..hardware.gripper_controllers import QbSoftHandController, RobotiqController
-from ..hardware.servo_pose_follower import ServoPoseFollower
+from ..core import ActionCommand, ControlCoordinator, ControlSource
+from ..device_manager import (
+    ControllerGripperBackend,
+    DEFAULT_ROBOT_PROFILE_NAME,
+    ServoArmBackend,
+    default_robot_profiles_path,
+    load_robot_profile,
+)
+from ..hardware.control.gripper_controllers import QbSoftHandController, RobotiqController
 
 
 class ROS2Worker(QThread):
@@ -24,32 +31,33 @@ class ROS2Worker(QThread):
     record_stats_signal = Signal(int, str, float)
     log_signal = Signal(str)
     demo_status_signal = Signal(str)
+    recording_state_signal = Signal(bool)
+    home_zone_active_signal = Signal(bool)
+    homing_active_signal = Signal(bool)
+    commander_result_signal = Signal(str)
 
-    def __init__(self, pose_topic, gripper_topic, action_topic):
+    def __init__(self, pose_topic=None, gripper_topic=None, action_topic=None, robot_profile=DEFAULT_ROBOT_PROFILE_NAME, robot_profiles_file=None):
         super().__init__()
         self.pose_topic = str(pose_topic).strip()
         self.gripper_topic = str(gripper_topic).strip()
         self.action_topic = str(action_topic).strip()
+        self.joint_states_topic = ""
+        self._robot_profile_name = str(robot_profile).strip() or DEFAULT_ROBOT_PROFILE_NAME
+        self._robot_profiles_file = str(robot_profiles_file or default_robot_profiles_path())
+        self._robot_profile = load_robot_profile(self._robot_profile_name, self._robot_profiles_file)
         self.node = None
         self._is_running = True
 
-        self._home_joint_positions = [1.524178, -2.100060, 1.864580, -1.345048, -1.575888, 1.528195]
+        self._home_joint_positions = []
         self._home_duration_sec = 3.0
-        self._home_joint_names = [
-            "shoulder_pan_joint",
-            "shoulder_lift_joint",
-            "elbow_joint",
-            "wrist_1_joint",
-            "wrist_2_joint",
-            "wrist_3_joint",
-        ]
-        self._home_joint_trajectory_topic = "/scaled_joint_trajectory_controller/joint_trajectory"
-        self._teleop_controller = "forward_position_controller"
-        self._trajectory_controller = "scaled_joint_trajectory_controller"
-        self._home_zone_translation_min_m = [0.04, 0.04, 0.04]
-        self._home_zone_translation_max_m = [0.08, 0.08, 0.08]
-        self._home_zone_rotation_min_deg = [5.0, 5.0, 5.0]
-        self._home_zone_rotation_max_deg = [10.0, 10.0, 10.0]
+        self._home_joint_names = []
+        self._home_joint_trajectory_topic = ""
+        self._teleop_controller = ""
+        self._trajectory_controller = ""
+        self._home_zone_translation_min_m = []
+        self._home_zone_translation_max_m = []
+        self._home_zone_rotation_min_deg = []
+        self._home_zone_rotation_max_deg = []
         self._inference_gripper_type = "robotiq"
         self._inference_control_hz = 50.0
         self._inference_control_enabled = False
@@ -59,11 +67,20 @@ class ROS2Worker(QThread):
         self._inference_control_timer = None
         self._arm_ctrl = None
         self._gripper_ctrl = None
+        self._control_coordinator = None
         self._binary_gripper_state = None
+        self.joint_sub = None
+        self.pose_sub = None
+        self.gripper_sub = None
+        self.action_sub = None
+        self.home_zone_active_sub = None
+        self.homing_active_sub = None
+        self.commander_result_sub = None
         self._binary_open_threshold = 0.35
         self._binary_close_threshold = 0.65
         self.start_cli = None
         self.stop_cli = None
+        self.discard_cli = None
         self.home_cli = None
         self.home_zone_cli = None
         self.cancel_home_zone_cli = None
@@ -76,6 +93,7 @@ class ROS2Worker(QThread):
         self.record_fps = 10.0
         self.actual_recorded_frames = 0
         self.realtime_record_fps = 0.0
+        self.last_demo_name = "无 (未录制)"
 
         self.robot_state = {
             "joints": [0.0] * 6,
@@ -85,6 +103,37 @@ class ROS2Worker(QThread):
             "action_linear": [0.0, 0.0, 0.0],
             "action_angular": [0.0, 0.0, 0.0],
         }
+
+        self._apply_robot_profile_defaults(self._robot_profile)
+
+    def _apply_robot_profile_defaults(self, robot_profile) -> None:
+        self.joint_states_topic = str(robot_profile.topics.joint_states)
+        self.pose_topic = str(robot_profile.topics.tool_pose)
+        self.action_topic = str(robot_profile.topics.servo_twist)
+        if not self.gripper_topic:
+            self.gripper_topic = str(robot_profile.topics.gripper_state)
+        self._home_joint_positions = [float(value) for value in robot_profile.home.joint_positions[:6]]
+        self._home_duration_sec = float(robot_profile.home.duration_sec)
+        self._home_joint_names = [str(name) for name in robot_profile.joint_names[:6]]
+        self._home_joint_trajectory_topic = str(robot_profile.topics.home_joint_trajectory)
+        self._teleop_controller = str(robot_profile.controllers.teleop)
+        self._trajectory_controller = str(robot_profile.controllers.trajectory)
+        self._home_zone_translation_min_m = [float(value) for value in robot_profile.home_zone.translation_min_m[:3]]
+        self._home_zone_translation_max_m = [float(value) for value in robot_profile.home_zone.translation_max_m[:3]]
+        self._home_zone_rotation_min_deg = [float(value) for value in robot_profile.home_zone.rotation_min_deg[:3]]
+        self._home_zone_rotation_max_deg = [float(value) for value in robot_profile.home_zone.rotation_max_deg[:3]]
+
+    def set_robot_profile(self, profile_name: str, robot_profiles_file: str | None = None) -> None:
+        resolved_name = str(profile_name).strip() or DEFAULT_ROBOT_PROFILE_NAME
+        resolved_file = str(robot_profiles_file or self._robot_profiles_file or default_robot_profiles_path())
+        self._robot_profile_name = resolved_name
+        self._robot_profiles_file = resolved_file
+        self._robot_profile = load_robot_profile(resolved_name, resolved_file)
+        self._apply_robot_profile_defaults(self._robot_profile)
+        if self.node is not None:
+            self._refresh_runtime_subscriptions()
+            self._apply_inference_control_parameters()
+            self._sync_commander_home_config(log_failures=True)
 
     def set_inference_control_config(self, gripper_type: str, control_hz: float = 50.0) -> None:
         normalized = str(gripper_type).strip().lower()
@@ -105,20 +154,28 @@ class ROS2Worker(QThread):
         self._inference_control_enabled = bool(enabled)
         if enabled:
             self._inference_estopped = False
-            if self.node is not None and (self._arm_ctrl is None or self._gripper_ctrl is None):
+            if self.node is not None and (self._arm_ctrl is None or self._gripper_ctrl is None or self._control_coordinator is None):
                 self._apply_inference_control_parameters()
                 self._setup_inference_control_backend()
+            if self._control_coordinator is not None:
+                self._control_coordinator.clear_estop()
+                self._control_coordinator.notify_inference_ready(True)
+                self._control_coordinator.notify_inference_execution(True)
             current_gripper = float(self.robot_state.get("gripper", 0.0))
             self._binary_gripper_state = 1.0 if current_gripper >= 0.5 else 0.0
             self.log_signal.emit("推理执行已使能。")
             return
 
+        if self._control_coordinator is not None:
+            self._control_coordinator.notify_inference_execution(False)
         self._publish_zero_twist()
         self.log_signal.emit("推理执行已停止。")
 
     def emergency_stop_inference(self) -> None:
         self._inference_estopped = True
         self._inference_control_enabled = False
+        if self._control_coordinator is not None:
+            self._control_coordinator.notify_estop(True)
         self._publish_zero_twist()
         self.log_signal.emit("已触发推理急停。")
 
@@ -241,6 +298,28 @@ class ROS2Worker(QThread):
         except Exception as exc:
             self.log_signal.emit(f"同步 commander Home 配置异常: {exc}")
 
+    def _refresh_runtime_subscriptions(self) -> None:
+        if self.node is None:
+            return
+
+        subscription_specs = [
+            ("joint_sub", JointState, self.joint_states_topic, self.joint_callback, 10),
+            ("pose_sub", PoseStamped, self.pose_topic, self.pose_callback, 10),
+            ("gripper_sub", Float32, self.gripper_topic, self.gripper_callback, 10),
+            ("action_sub", TwistStamped, self.action_topic, self.action_callback, 10),
+            ("home_zone_active_sub", Bool, "/commander/home_zone_active", self.home_zone_active_callback, 10),
+            ("homing_active_sub", Bool, "/commander/homing_active", self.homing_active_callback, 10),
+            ("commander_result_sub", String, "/commander/last_motion_result", self.commander_result_callback, 10),
+        ]
+        for attr_name, msg_type, topic_name, callback, qos in subscription_specs:
+            existing = getattr(self, attr_name, None)
+            if existing is not None:
+                try:
+                    self.node.destroy_subscription(existing)
+                except Exception:
+                    pass
+            setattr(self, attr_name, self.node.create_subscription(msg_type, topic_name, callback, qos))
+
     def _set_or_declare_parameter(self, name: str, value) -> None:
         if self.node is None:
             return
@@ -253,31 +332,34 @@ class ROS2Worker(QThread):
     def _apply_inference_control_parameters(self) -> None:
         if self.node is None:
             return
+        grippers = self._robot_profile.grippers
+        robotiq = grippers.robotiq
+        qbsofthand = grippers.qbsofthand
         self._set_or_declare_parameter("gripper_type", self._inference_gripper_type)
-        self._set_or_declare_parameter("target_frame_id", "base")
+        self._set_or_declare_parameter("target_frame_id", self._robot_profile.target_frame_id)
         self._set_or_declare_parameter("servo_twist_topic", self.action_topic)
         self._set_or_declare_parameter("auto_start_servo", True)
-        self._set_or_declare_parameter("start_servo_service", "/servo_node/start_servo")
+        self._set_or_declare_parameter("start_servo_service", self._robot_profile.services.start_servo)
         self._set_or_declare_parameter("auto_switch_controllers", True)
-        self._set_or_declare_parameter("controller_manager_ns", "/controller_manager")
+        self._set_or_declare_parameter("controller_manager_ns", self._robot_profile.services.controller_manager_ns)
         self._set_or_declare_parameter("teleop_controller", self._teleop_controller)
         self._set_or_declare_parameter("trajectory_controller", self._trajectory_controller)
         self._set_or_declare_parameter("startup_retry_period_sec", 1.0)
-        self._set_or_declare_parameter("gripper_cmd_topic", self.gripper_topic)
-        self._set_or_declare_parameter("gripper_command_delta", 0.01)
-        self._set_or_declare_parameter("gripper_quantization_levels", 10)
-        self._set_or_declare_parameter("robotiq_command_interface", "position_action")
-        self._set_or_declare_parameter("robotiq_confidence_topic", "/robotiq_2f_gripper/confidence_command")
-        self._set_or_declare_parameter("robotiq_binary_topic", "/robotiq_2f_gripper/binary_command")
-        self._set_or_declare_parameter("robotiq_action_name", "/robotiq_2f_gripper_action")
-        self._set_or_declare_parameter("robotiq_binary_threshold", 0.5)
-        self._set_or_declare_parameter("robotiq_open_ratio", 0.9)
-        self._set_or_declare_parameter("robotiq_max_open_position_m", 0.142)
-        self._set_or_declare_parameter("robotiq_target_speed", 1.0)
-        self._set_or_declare_parameter("robotiq_target_force", 0.5)
-        self._set_or_declare_parameter("qbsofthand_service_name", "/qbsofthand_control_node/set_closure")
-        self._set_or_declare_parameter("qbsofthand_duration_sec", 0.3)
-        self._set_or_declare_parameter("qbsofthand_speed_ratio", 1.0)
+        self._set_or_declare_parameter("gripper_cmd_topic", self.gripper_topic or grippers.command_topic)
+        self._set_or_declare_parameter("gripper_command_delta", grippers.command_delta)
+        self._set_or_declare_parameter("gripper_quantization_levels", grippers.quantization_levels)
+        self._set_or_declare_parameter("robotiq_command_interface", robotiq.command_interface)
+        self._set_or_declare_parameter("robotiq_confidence_topic", robotiq.confidence_topic)
+        self._set_or_declare_parameter("robotiq_binary_topic", robotiq.binary_topic)
+        self._set_or_declare_parameter("robotiq_action_name", robotiq.action_name)
+        self._set_or_declare_parameter("robotiq_binary_threshold", robotiq.binary_threshold)
+        self._set_or_declare_parameter("robotiq_open_ratio", robotiq.open_ratio)
+        self._set_or_declare_parameter("robotiq_max_open_position_m", robotiq.max_open_position_m)
+        self._set_or_declare_parameter("robotiq_target_speed", robotiq.target_speed)
+        self._set_or_declare_parameter("robotiq_target_force", robotiq.target_force)
+        self._set_or_declare_parameter("qbsofthand_service_name", qbsofthand.service_name)
+        self._set_or_declare_parameter("qbsofthand_duration_sec", qbsofthand.duration_sec)
+        self._set_or_declare_parameter("qbsofthand_speed_ratio", qbsofthand.speed_ratio)
 
     def _build_gripper_controller(self):
         controller_cls = RobotiqController if self._inference_gripper_type == "robotiq" else QbSoftHandController
@@ -289,8 +371,19 @@ class ROS2Worker(QThread):
 
         previous_arm = self._arm_ctrl
         previous_gripper = self._gripper_ctrl
-        self._arm_ctrl = ServoPoseFollower(self.node)
-        self._gripper_ctrl = self._build_gripper_controller()
+        self._arm_ctrl = ServoArmBackend.from_node(self.node)
+        self._gripper_ctrl = ControllerGripperBackend(self._build_gripper_controller())
+        self._control_coordinator = ControlCoordinator(
+            self._arm_ctrl,
+            self._gripper_ctrl,
+            active_source=ControlSource.NONE,
+            logger=self.node.get_logger(),
+        )
+        self._control_coordinator.notify_inference_ready(True)
+        if self._inference_estopped:
+            self._control_coordinator.notify_estop(True)
+        elif self._inference_control_enabled:
+            self._control_coordinator.notify_inference_execution(True)
 
         for controller in (previous_arm, previous_gripper):
             if controller is None:
@@ -301,9 +394,11 @@ class ROS2Worker(QThread):
                 pass
 
     def _publish_zero_twist(self) -> None:
-        if self._arm_ctrl is None:
+        if self._control_coordinator is not None:
+            self._control_coordinator.publish_zero(source=ControlSource.SAFETY)
             return
-        self._arm_ctrl.send_twist(Twist())
+        if self._arm_ctrl is not None:
+            self._arm_ctrl.send_zero_twist()
 
     def _binary_gripper_command(self, value: float) -> float:
         closure = max(0.0, min(1.0, float(value)))
@@ -321,12 +416,15 @@ class ROS2Worker(QThread):
     def _publish_inference_control_step(self) -> None:
         if not self._inference_control_enabled or self._inference_estopped:
             return
-        if self._arm_ctrl is None or self._gripper_ctrl is None:
+        if self._arm_ctrl is None or self._gripper_ctrl is None or self._control_coordinator is None:
             if self.node is not None:
                 self._apply_inference_control_parameters()
                 self._setup_inference_control_backend()
-            if self._arm_ctrl is None or self._gripper_ctrl is None:
+            if self._arm_ctrl is None or self._gripper_ctrl is None or self._control_coordinator is None:
                 return
+
+        if self._control_coordinator.snapshot().active_source != ControlSource.INFERENCE:
+            return
 
         with self._inference_action_lock:
             action = None if self._latest_inference_action is None else self._latest_inference_action.copy()
@@ -334,15 +432,11 @@ class ROS2Worker(QThread):
         if action is None or action.size < 7:
             return
 
-        twist = Twist()
-        twist.linear.x = float(action[0])
-        twist.linear.y = float(action[1])
-        twist.linear.z = float(action[2])
-        twist.angular.x = float(action[3])
-        twist.angular.y = float(action[4])
-        twist.angular.z = float(action[5])
-        self._arm_ctrl.send_twist(twist)
-        self._gripper_ctrl.set_gripper(self._binary_gripper_command(float(action[6])))
+        command = ActionCommand.from_array7(action, source=ControlSource.INFERENCE)
+        command = command.with_gripper(self._binary_gripper_command(command.gripper))
+        dispatch_result = self._control_coordinator.dispatch(command)
+        if not dispatch_result.accepted and self.node is not None:
+            self.node.get_logger().debug(f"Inference action dropped by coordinator: {dispatch_result.reason}")
 
     def run(self):
         rclpy.init()
@@ -353,10 +447,7 @@ class ROS2Worker(QThread):
             self._publish_inference_control_step,
         )
 
-        self.joint_sub = self.node.create_subscription(JointState, "/joint_states", self.joint_callback, 10)
-        self.pose_sub = self.node.create_subscription(PoseStamped, self.pose_topic, self.pose_callback, 10)
-        self.gripper_sub = self.node.create_subscription(Float32, self.gripper_topic, self.gripper_callback, 10)
-        self.action_sub = self.node.create_subscription(TwistStamped, self.action_topic, self.action_callback, 10)
+        self._refresh_runtime_subscriptions()
         self.record_stats_sub = self.node.create_subscription(
             Float32MultiArray,
             "/data_collector/record_stats",
@@ -366,6 +457,7 @@ class ROS2Worker(QThread):
 
         self.start_cli = self.node.create_client(Trigger, "/data_collector/start")
         self.stop_cli = self.node.create_client(Trigger, "/data_collector/stop")
+        self.discard_cli = self.node.create_client(Trigger, "/data_collector/discard_last_demo")
         self.home_cli = self.node.create_client(Trigger, "/commander/go_home")
         self.home_zone_cli = self.node.create_client(Trigger, "/commander/go_home_zone")
         self.cancel_home_zone_cli = self.node.create_client(Trigger, "/commander/cancel_home_zone")
@@ -387,14 +479,9 @@ class ROS2Worker(QThread):
         rclpy.shutdown()
 
     def joint_callback(self, msg):
-        target_joints = [
-            "shoulder_pan_joint",
-            "shoulder_lift_joint",
-            "elbow_joint",
-            "wrist_1_joint",
-            "wrist_2_joint",
-            "wrist_3_joint",
-        ]
+        target_joints = list(self._home_joint_names[:6])
+        if not target_joints:
+            return
         if msg.name and msg.position:
             name_to_idx = {name: idx for idx, name in enumerate(msg.name)}
             out = []
@@ -402,7 +489,7 @@ class ROS2Worker(QThread):
                 if joint_name in name_to_idx:
                     out.append(msg.position[name_to_idx[joint_name]])
 
-            if len(out) == 6:
+            if len(out) == len(target_joints):
                 self.robot_state["joints"] = out
                 self._emit_robot_state()
 
@@ -421,6 +508,27 @@ class ROS2Worker(QThread):
         self.robot_state["action_linear"] = [msg.twist.linear.x, msg.twist.linear.y, msg.twist.linear.z]
         self.robot_state["action_angular"] = [msg.twist.angular.x, msg.twist.angular.y, msg.twist.angular.z]
         self._emit_robot_state()
+
+    def home_zone_active_callback(self, msg):
+        active = bool(msg.data)
+        if self._control_coordinator is not None:
+            self._control_coordinator.notify_home_zone(active)
+            if active:
+                self._publish_zero_twist()
+        self.home_zone_active_signal.emit(active)
+
+    def homing_active_callback(self, msg):
+        active = bool(msg.data)
+        if self._control_coordinator is not None:
+            self._control_coordinator.notify_homing(active)
+            if active:
+                self._publish_zero_twist()
+        self.homing_active_signal.emit(active)
+
+    def commander_result_callback(self, msg):
+        message = str(getattr(msg, "data", "")).strip()
+        if message:
+            self.commander_result_signal.emit(message)
 
     def _emit_robot_state(self):
         joints = np.array(self.robot_state.get("joints", [0.0] * 6))
@@ -496,6 +604,16 @@ class ROS2Worker(QThread):
             future.add_done_callback(self.stop_record_done)
         else:
             self.log_signal.emit("错误: 找不到 /data_collector/stop 服务")
+
+    def call_discard_last_demo(self):
+        if self.discard_cli is None:
+            self.log_signal.emit("ROS 监听器初始化中，请稍后再试。")
+            return
+        if self.discard_cli.wait_for_service(timeout_sec=1.0):
+            future = self.discard_cli.call_async(Trigger.Request())
+            future.add_done_callback(self.discard_last_demo_done)
+        else:
+            self.log_signal.emit("错误: 找不到 /data_collector/discard_last_demo 服务")
 
     def call_go_home(self):
         if self._inference_control_enabled:
@@ -577,7 +695,9 @@ class ROS2Worker(QThread):
                 else:
                     msg_parts = response.message.split()
                     demo_name = msg_parts[2] if len(msg_parts) >= 3 else "未知"
+                self.last_demo_name = demo_name
                 self.demo_status_signal.emit(demo_name)
+                self.recording_state_signal.emit(True)
         except Exception as exc:
             self.log_signal.emit(f"服务调用异常: {exc}")
 
@@ -588,7 +708,22 @@ class ROS2Worker(QThread):
             if response.success:
                 self.is_recording = False
                 self.realtime_record_fps = 0.0
-                self.demo_status_signal.emit("无 (未录制)")
+                demo_match = re.search(r"Stopped recording\s+(\S+)", str(response.message))
+                if demo_match:
+                    self.last_demo_name = demo_match.group(1)
+                self.demo_status_signal.emit(self.last_demo_name)
+                self.recording_state_signal.emit(False)
+        except Exception as exc:
+            self.log_signal.emit(f"服务调用异常: {exc}")
+
+    def discard_last_demo_done(self, future):
+        try:
+            response = future.result()
+            self.log_signal.emit(f"弃用录制服务: {response.message}")
+            if response.success:
+                self.last_demo_name = "无 (未录制)"
+                self.demo_status_signal.emit(self.last_demo_name)
+                self.recording_state_signal.emit(False)
         except Exception as exc:
             self.log_signal.emit(f"服务调用异常: {exc}")
 

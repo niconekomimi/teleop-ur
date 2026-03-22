@@ -20,6 +20,7 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.actions import SetRemap
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def _python_supports_modules(candidate: str, modules: tuple[str, ...]) -> bool:
@@ -211,19 +212,21 @@ def _maybe_include_joy_driver(context, *args, **kwargs):
 	if input_type != "joy":
 		return actions
 
-	joy_share = get_package_share_directory("multi_joy_driver")
-	joy_launch_path = os.path.join(joy_share, "launch", "joy_driver.launch.py")
+	teleop_share = get_package_share_directory("teleop_control_py")
+	joy_launch_path = os.path.join(teleop_share, "launch", "joy_driver.launch.py")
+	joy_params_file = os.path.join(teleop_share, "config", "joy_driver_params.yaml")
 	actions.append(
 		IncludeLaunchDescription(
 			PythonLaunchDescriptionSource(joy_launch_path),
 			launch_arguments={
+				"params_file": joy_params_file,
 				"python_executable": LaunchConfiguration("python_executable"),
 				"profile": LaunchConfiguration("joy_profile"),
 				"device_path": LaunchConfiguration("joy_device_path"),
 			}.items(),
 		)
 	)
-	actions.append(LogInfo(msg="[control_system] Included multi_joy_driver/joy_driver.launch.py"))
+	actions.append(LogInfo(msg="[control_system] Included teleop_control_py joy_driver.launch.py"))
 	return actions
 
 
@@ -265,43 +268,6 @@ def _maybe_include_moveit_servo(context, *args, **kwargs):
 	return actions
 
 
-def _maybe_include_realsense(context, *args, **kwargs):
-	input_type = _resolve_input_type(context)
-
-	enable_camera_raw = LaunchConfiguration("enable_camera").perform(context).strip().lower()
-	enable_camera = enable_camera_raw in ("1", "true", "yes", "on")
-
-	actions = [
-		LogInfo(
-			msg=(
-				f"[control_system] enable_camera={enable_camera_raw} "
-				f"input_type={input_type}"
-			)
-		)
-	]
-
-	if input_type != "mediapipe":
-		actions.append(LogInfo(msg="[control_system] Skip RealSense because input_type is not mediapipe"))
-		return actions
-
-	if not enable_camera:
-		actions.append(LogInfo(msg="[control_system] RealSense disabled by launch arg"))
-		return actions
-
-	realsense_share = get_package_share_directory("realsense2_camera")
-	realsense_launch_path = os.path.join(realsense_share, "launch", "rs_launch.py")
-	actions.append(
-		IncludeLaunchDescription(
-			PythonLaunchDescriptionSource(realsense_launch_path),
-			launch_arguments={
-				"align_depth.enable": "true",
-			}.items(),
-		)
-	)
-	actions.append(LogInfo(msg="[control_system] Included realsense2_camera/rs_launch.py with align_depth.enable=true"))
-	return actions
-
-
 def _collector_end_effector_type(gripper_type: str) -> str:
 	return "qbsofthand" if gripper_type == "qbsofthand" else "robotic_gripper"
 
@@ -315,17 +281,19 @@ def _maybe_include_data_collector(context, *args, **kwargs):
 
 	gripper_type = _resolve_gripper_type(context)
 	collector_ee = _collector_end_effector_type(gripper_type)
+	resolved_robot_profile = LaunchConfiguration("robot_profile").perform(context).strip()
 	actions.append(
 		Node(
 			package="teleop_control_py",
 			executable="data_collector_node",
 			name="data_collector",
 			output="screen",
-			parameters=[LaunchConfiguration("data_collector_params_file")],
-			arguments=[
-				"--ros-args",
-				"-p",
-				f"end_effector_type:={collector_ee}",
+			parameters=[
+				LaunchConfiguration("data_collector_params_file"),
+				{
+					"end_effector_type": collector_ee,
+					"robot_profile": LaunchConfiguration("robot_profile"),
+				},
 			],
 		)
 	)
@@ -333,7 +301,7 @@ def _maybe_include_data_collector(context, *args, **kwargs):
 		LogInfo(
 			msg=(
 				"[control_system] Included teleop_control_py.nodes.data_collector_node "
-				f"with end_effector_type={collector_ee}"
+				f"with end_effector_type={collector_ee}, robot_profile={resolved_robot_profile}"
 			)
 		)
 	)
@@ -343,7 +311,6 @@ def _maybe_include_data_collector(context, *args, **kwargs):
 def generate_launch_description() -> LaunchDescription:
 	teleop_share = get_package_share_directory("teleop_control_py")
 	default_params = os.path.join(teleop_share, "config", "teleop_params.yaml")
-	default_commander_params = os.path.join(teleop_share, "config", "robot_commander_params.yaml")
 
 	params_file_arg = DeclareLaunchArgument(
 		"params_file",
@@ -378,17 +345,52 @@ def generate_launch_description() -> LaunchDescription:
 	joy_profile_arg = DeclareLaunchArgument(
 		"joy_profile",
 		default_value="auto",
-		description="Joystick profile passed to multi_joy_driver (auto|xbox|ps5|generic).",
+		description="Joystick profile for joy_driver_node (auto|xbox|ps5|generic).",
 	)
 	joy_device_path_arg = DeclareLaunchArgument(
 		"joy_device_path",
 		default_value="",
-		description="Optional joystick event device path for multi_joy_driver.",
+		description="Optional joystick event device path for joy_driver_node.",
 	)
 	mediapipe_input_topic_arg = DeclareLaunchArgument(
 		"mediapipe_input_topic",
 		default_value="",
 		description="Optional MediaPipe image topic override.",
+	)
+	mediapipe_depth_topic_arg = DeclareLaunchArgument(
+		"mediapipe_depth_topic",
+		default_value="",
+		description="Optional MediaPipe depth topic override.",
+	)
+	mediapipe_camera_info_topic_arg = DeclareLaunchArgument(
+		"mediapipe_camera_info_topic",
+		default_value="",
+		description="Optional MediaPipe aligned camera_info topic override.",
+	)
+	mediapipe_camera_driver_arg = DeclareLaunchArgument(
+		"mediapipe_camera_driver",
+		default_value="realsense",
+		description="MediaPipe camera driver type (realsense|oakd).",
+	)
+	mediapipe_camera_serial_number_arg = DeclareLaunchArgument(
+		"mediapipe_camera_serial_number",
+		default_value="",
+		description="Optional serial number for auto-started MediaPipe camera driver.",
+	)
+	mediapipe_enable_depth_arg = DeclareLaunchArgument(
+		"mediapipe_enable_depth",
+		default_value="false",
+		description="Enable SDK depth stream for MediaPipe input (true|false).",
+	)
+	mediapipe_show_debug_window_arg = DeclareLaunchArgument(
+		"mediapipe_show_debug_window",
+		default_value="true",
+		description="Enable MediaPipe OpenCV debug window in teleop node.",
+	)
+	mediapipe_use_sdk_camera_arg = DeclareLaunchArgument(
+		"mediapipe_use_sdk_camera",
+		default_value="true",
+		description="Use SDK camera directly for MediaPipe input (true|false).",
 	)
 
 	robotiq_namespace_arg = DeclareLaunchArgument(
@@ -427,6 +429,11 @@ def generate_launch_description() -> LaunchDescription:
 		default_value="ur5",
 		description="UR robot type (ur5, ur10, etc.)",
 	)
+	robot_profile_arg = DeclareLaunchArgument(
+		"robot_profile",
+		default_value=["ur_servo_", LaunchConfiguration("ur_type")],
+		description="Backend-level robot profile name used by teleop/commander/collector.",
+	)
 	robot_ip_arg = DeclareLaunchArgument(
 		"robot_ip",
 		default_value="192.168.1.211",
@@ -462,11 +469,6 @@ def generate_launch_description() -> LaunchDescription:
 		default_value="true",
 		description="Enable MoveIt bringup (move_group + optional servo).",
 	)
-	enable_camera_arg = DeclareLaunchArgument(
-		"enable_camera",
-		default_value="true",
-		description="Enable RealSense camera (effective only when input_type=mediapipe)",
-	)
 	enable_data_collector_arg = DeclareLaunchArgument(
 		"enable_data_collector",
 		default_value="false",
@@ -482,10 +484,10 @@ def generate_launch_description() -> LaunchDescription:
 		default_value=os.path.join(teleop_share, "config", "data_collector_params.yaml"),
 		description="Path to data collector parameter file",
 	)
-	robot_commander_params_file_arg = DeclareLaunchArgument(
-		"robot_commander_params_file",
-		default_value=default_commander_params,
-		description="Path to robot commander parameter file",
+	commander_pose_max_age_sec_arg = DeclareLaunchArgument(
+		"commander_pose_max_age_sec",
+		default_value="0.05",
+		description="Commander pose freshness threshold in seconds.",
 	)
 
 	ur_driver_share = get_package_share_directory("ur_robot_driver")
@@ -506,8 +508,14 @@ def generate_launch_description() -> LaunchDescription:
 		name="commander",
 		output="screen",
 		parameters=[
-			LaunchConfiguration("robot_commander_params_file"),
-			{"ur_type": LaunchConfiguration("ur_type")},
+			{
+				"ur_type": LaunchConfiguration("ur_type"),
+				"robot_profile": LaunchConfiguration("robot_profile"),
+				"pose_max_age_sec": ParameterValue(
+					LaunchConfiguration("commander_pose_max_age_sec"),
+					value_type=float,
+				),
+			},
 		],
 	)
 
@@ -519,8 +527,16 @@ def generate_launch_description() -> LaunchDescription:
 			"input_type": LaunchConfiguration("input_type"),
 			"gripper_type": LaunchConfiguration("gripper_type"),
 			"mediapipe_input_topic": LaunchConfiguration("mediapipe_input_topic"),
+			"mediapipe_depth_topic": LaunchConfiguration("mediapipe_depth_topic"),
+			"mediapipe_camera_info_topic": LaunchConfiguration("mediapipe_camera_info_topic"),
+			"mediapipe_camera_driver": LaunchConfiguration("mediapipe_camera_driver"),
+			"mediapipe_camera_serial_number": LaunchConfiguration("mediapipe_camera_serial_number"),
+			"mediapipe_enable_depth": LaunchConfiguration("mediapipe_enable_depth"),
+			"mediapipe_show_debug_window": LaunchConfiguration("mediapipe_show_debug_window"),
+			"mediapipe_use_sdk_camera": LaunchConfiguration("mediapipe_use_sdk_camera"),
 			"control_mode": LaunchConfiguration("control_mode"),
 			"end_effector": LaunchConfiguration("end_effector"),
+			"robot_profile": LaunchConfiguration("robot_profile"),
 		}.items(),
 		condition=IfCondition(LaunchConfiguration("launch_teleop_node")),
 	)
@@ -534,6 +550,13 @@ def generate_launch_description() -> LaunchDescription:
 			joy_profile_arg,
 			joy_device_path_arg,
 			mediapipe_input_topic_arg,
+			mediapipe_depth_topic_arg,
+			mediapipe_camera_info_topic_arg,
+			mediapipe_camera_driver_arg,
+			mediapipe_camera_serial_number_arg,
+			mediapipe_enable_depth_arg,
+			mediapipe_show_debug_window_arg,
+			mediapipe_use_sdk_camera_arg,
 			control_mode_arg,
 			end_effector_arg,
 			robotiq_namespace_arg,
@@ -543,6 +566,7 @@ def generate_launch_description() -> LaunchDescription:
 			robotiq_rviz2_arg,
 			robotiq_log_level_arg,
 			ur_type_arg,
+			robot_profile_arg,
 			robot_ip_arg,
 			reverse_ip_arg,
 			launch_rviz_arg,
@@ -550,14 +574,12 @@ def generate_launch_description() -> LaunchDescription:
 			launch_servo_arg,
 			initial_joint_controller_arg,
 			enable_moveit_arg,
-			enable_camera_arg,
 			enable_data_collector_arg,
 			launch_teleop_node_arg,
 			data_collector_params_file_arg,
-			robot_commander_params_file_arg,
+			commander_pose_max_age_sec_arg,
 			OpaqueFunction(function=_maybe_include_joy_driver),
 			OpaqueFunction(function=_maybe_include_moveit_servo),
-			OpaqueFunction(function=_maybe_include_realsense),
 			OpaqueFunction(function=_maybe_include_end_effector_driver),
 			OpaqueFunction(function=_maybe_include_data_collector),
 			ur_launch,

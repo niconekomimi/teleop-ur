@@ -16,10 +16,15 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from rclpy.time import Time
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
+from ..device_manager import (
+    DEFAULT_ROBOT_PROFILE_NAME,
+    default_robot_profiles_path,
+    load_robot_profile,
+)
 from ..utils.home_zone_utils import (
     compose_pose_with_rpy_offset,
     drive_pose_target,
@@ -35,49 +40,15 @@ class RobotCommanderNode(Node):
     def __init__(self) -> None:
         super().__init__("commander")
 
-        self.declare_parameter("ur_type", "ur5")
-        self.declare_parameter("joint_states_topic", "/joint_states")
-        self.declare_parameter("tool_pose_topic", "/tcp_pose_broadcaster/pose")
-        self.declare_parameter("servo_twist_topic", "/servo_node/delta_twist_cmds")
-        self.declare_parameter(
-            "joint_names",
-            [
-                "shoulder_pan_joint",
-                "shoulder_lift_joint",
-                "elbow_joint",
-                "wrist_1_joint",
-                "wrist_2_joint",
-                "wrist_3_joint",
-            ],
-        )
-        self.declare_parameter("pose_max_age_sec", 0.2)
-        self.declare_parameter("pose_stamp_zero_is_ref", True)
-        self.declare_parameter("pose_use_received_time_fallback", True)
-        self.declare_parameter(
-            "home_joint_positions",
-            [1.524178, -2.100060, 1.864580, -1.345048, -1.575888, 1.528195],
-        )
-        self.declare_parameter("home_zone_translation_min_m", [0.04, 0.04, 0.04])
-        self.declare_parameter("home_zone_translation_max_m", [0.08, 0.08, 0.08])
-        self.declare_parameter("home_zone_rotation_min_deg", [5.0, 5.0, 5.0])
-        self.declare_parameter("home_zone_rotation_max_deg", [10.0, 10.0, 10.0])
-        self.declare_parameter("home_zone_timeout_sec", 30.0)
-        self.declare_parameter("home_zone_rate_hz", 60.0)
-        self.declare_parameter("home_zone_max_linear_vel", 0.50)
-        self.declare_parameter("home_zone_max_angular_vel", 1.5)
-        self.declare_parameter("home_zone_linear_gain", 2.4)
-        self.declare_parameter("home_zone_angular_gain", 2.4)
-        self.declare_parameter("home_zone_position_tolerance_m", 0.005)
-        self.declare_parameter("home_zone_rotation_tolerance_deg", 6.0)
-        self.declare_parameter("home_duration_sec", 3.0)
-        self.declare_parameter(
-            "home_joint_trajectory_topic",
-            "/scaled_joint_trajectory_controller/joint_trajectory",
-        )
-        self.declare_parameter("teleop_controller", "forward_position_controller")
-        self.declare_parameter("trajectory_controller", "scaled_joint_trajectory_controller")
+        self.declare_parameter("robot_profile", DEFAULT_ROBOT_PROFILE_NAME)
+        self.declare_parameter("robot_profiles_file", str(default_robot_profiles_path()))
+        self._robot_profile_name = str(self.get_parameter("robot_profile").value).strip() or DEFAULT_ROBOT_PROFILE_NAME
+        self._robot_profiles_file = str(self.get_parameter("robot_profiles_file").value).strip()
+        self._robot_profile = load_robot_profile(self._robot_profile_name, self._robot_profiles_file)
 
-        self._ur_type = str(self.get_parameter("ur_type").value).strip().lower() or "ur5"
+        self._declare_parameters(self._robot_profile)
+
+        self._ur_type = str(self.get_parameter("ur_type").value).strip().lower() or self._robot_profile.arm_model or "ur5"
         self._joint_names = [str(name) for name in list(self.get_parameter("joint_names").value)[:6]]
         self._pose_max_age = float(self.get_parameter("pose_max_age_sec").value)
         self._pose_stamp_zero_is_ref = bool(self.get_parameter("pose_stamp_zero_is_ref").value)
@@ -107,20 +78,54 @@ class RobotCommanderNode(Node):
         self._home_pub = self.create_publisher(JointTrajectory, home_topic, 10)
         self._home_zone_twist_pub = self.create_publisher(TwistStamped, twist_topic, 10)
         self._home_zone_active_pub = self.create_publisher(Bool, "~/home_zone_active", 10)
+        self._homing_active_pub = self.create_publisher(Bool, "~/homing_active", 10)
+        self._motion_result_pub = self.create_publisher(String, "~/last_motion_result", 10)
 
-        self._list_ctrl_client = self.create_client(ListControllers, "/controller_manager/list_controllers")
-        self._switch_ctrl_client = self.create_client(SwitchController, "/controller_manager/switch_controller")
-        self._start_servo_client = self.create_client(Trigger, "/servo_node/start_servo")
+        controller_manager_ns = str(self.get_parameter("controller_manager_ns").value).rstrip("/")
+        start_servo_service = str(self.get_parameter("start_servo_service").value)
+        self._list_ctrl_client = self.create_client(ListControllers, f"{controller_manager_ns}/list_controllers")
+        self._switch_ctrl_client = self.create_client(SwitchController, f"{controller_manager_ns}/switch_controller")
+        self._start_servo_client = self.create_client(Trigger, start_servo_service)
 
         self._srv_go_home = self.create_service(Trigger, "~/go_home", self._srv_go_home_cb)
         self._srv_go_home_zone = self.create_service(Trigger, "~/go_home_zone", self._srv_go_home_zone_cb)
         self._srv_cancel_home_zone = self.create_service(Trigger, "~/cancel_home_zone", self._srv_cancel_home_zone_cb)
 
         self._publish_home_zone_active(False)
+        self._publish_homing_active(False)
         self.get_logger().info(
             "RobotCommanderNode ready. Services: ~/go_home, ~/go_home_zone, ~/cancel_home_zone. "
-            f"Joint topic={joint_topic}, Pose topic={pose_topic}, Home topic={home_topic}"
+            f"robot_profile={self._robot_profile.name}, Joint topic={joint_topic}, Pose topic={pose_topic}, Home topic={home_topic}"
         )
+
+    def _declare_parameters(self, robot_profile) -> None:
+        self.declare_parameter("ur_type", robot_profile.arm_model)
+        self.declare_parameter("joint_states_topic", robot_profile.topics.joint_states)
+        self.declare_parameter("tool_pose_topic", robot_profile.topics.tool_pose)
+        self.declare_parameter("servo_twist_topic", robot_profile.topics.servo_twist)
+        self.declare_parameter("joint_names", list(robot_profile.joint_names))
+        self.declare_parameter("pose_max_age_sec", 0.2)
+        self.declare_parameter("pose_stamp_zero_is_ref", True)
+        self.declare_parameter("pose_use_received_time_fallback", True)
+        self.declare_parameter("home_joint_positions", list(robot_profile.home.joint_positions))
+        self.declare_parameter("home_zone_translation_min_m", list(robot_profile.home_zone.translation_min_m))
+        self.declare_parameter("home_zone_translation_max_m", list(robot_profile.home_zone.translation_max_m))
+        self.declare_parameter("home_zone_rotation_min_deg", list(robot_profile.home_zone.rotation_min_deg))
+        self.declare_parameter("home_zone_rotation_max_deg", list(robot_profile.home_zone.rotation_max_deg))
+        self.declare_parameter("home_zone_timeout_sec", robot_profile.home_zone.timeout_sec)
+        self.declare_parameter("home_zone_rate_hz", robot_profile.home_zone.rate_hz)
+        self.declare_parameter("home_zone_max_linear_vel", robot_profile.home_zone.max_linear_vel)
+        self.declare_parameter("home_zone_max_angular_vel", robot_profile.home_zone.max_angular_vel)
+        self.declare_parameter("home_zone_linear_gain", robot_profile.home_zone.linear_gain)
+        self.declare_parameter("home_zone_angular_gain", robot_profile.home_zone.angular_gain)
+        self.declare_parameter("home_zone_position_tolerance_m", robot_profile.home_zone.position_tolerance_m)
+        self.declare_parameter("home_zone_rotation_tolerance_deg", robot_profile.home_zone.rotation_tolerance_deg)
+        self.declare_parameter("home_duration_sec", robot_profile.home.duration_sec)
+        self.declare_parameter("home_joint_trajectory_topic", robot_profile.topics.home_joint_trajectory)
+        self.declare_parameter("teleop_controller", robot_profile.controllers.teleop)
+        self.declare_parameter("trajectory_controller", robot_profile.controllers.trajectory)
+        self.declare_parameter("start_servo_service", robot_profile.services.start_servo)
+        self.declare_parameter("controller_manager_ns", robot_profile.services.controller_manager_ns)
 
     def _on_joint_state(self, msg: JointState) -> None:
         joint_pos = self._map_joint_positions(msg)
@@ -171,6 +176,8 @@ class RobotCommanderNode(Node):
             return res
 
         self._homing_in_progress = True
+        self._publish_homing_active(True)
+        self._publish_motion_result("go_home", "started")
         threading.Thread(target=self._execute_go_home_sequence, args=(home_positions,), daemon=True).start()
 
         res.success = True
@@ -225,6 +232,7 @@ class RobotCommanderNode(Node):
         token = self._next_home_zone_token()
         self._home_zone_in_progress = True
         self._publish_home_zone_active(True)
+        self._publish_motion_result("go_home_zone", "started")
         threading.Thread(
             target=self._execute_go_home_zone_sequence,
             args=(token, [float(value) for value in home_positions[:6]]),
@@ -265,6 +273,27 @@ class RobotCommanderNode(Node):
             msg = Bool()
             msg.data = bool(active)
             self._home_zone_active_pub.publish(msg)
+        except Exception:
+            pass
+
+    def _publish_homing_active(self, active: bool) -> None:
+        try:
+            msg = Bool()
+            msg.data = bool(active)
+            self._homing_active_pub.publish(msg)
+        except Exception:
+            pass
+
+    def _publish_motion_result(self, command: str, outcome: str, detail: str = "") -> None:
+        message = f"{command}:{outcome}"
+        detail_text = str(detail).strip()
+        if detail_text:
+            detail_text = detail_text.replace("\n", " ")
+            message = f"{message}:{detail_text}"
+        try:
+            msg = String()
+            msg.data = message
+            self._motion_result_pub.publish(msg)
         except Exception:
             pass
 
@@ -490,14 +519,22 @@ class RobotCommanderNode(Node):
         self._publish_home_zone_twist((0.0, 0.0, 0.0), (0.0, 0.0, 0.0))
 
     def _execute_go_home_zone_sequence(self, token: int, home_positions: list[float]) -> None:
+        outcome = "failed"
+        detail = "unknown"
         try:
             if self._home_zone_aborted(token):
+                outcome = "cancelled"
+                detail = "aborted_before_start"
                 return
 
             self._homing_in_progress = True
+            self._publish_homing_active(True)
             self._execute_go_home_for_home_zone_sequence(token, home_positions)
             self._homing_in_progress = False
+            self._publish_homing_active(False)
             if self._home_zone_aborted(token):
+                outcome = "cancelled"
+                detail = "aborted_after_home"
                 return
 
             time.sleep(0.2)
@@ -562,17 +599,31 @@ class RobotCommanderNode(Node):
                 f"Home Zone {'reached' if success else 'stopped'} "
                 f"residual_pos={pos_err_m:.4f}m residual_rot={rot_err_deg:.2f}deg"
             )
+            if self._home_zone_aborted(token):
+                outcome = "cancelled"
+                detail = "aborted_during_servo"
+            elif success:
+                outcome = "success"
+                detail = f"residual_pos={pos_err_m:.4f}m residual_rot={rot_err_deg:.2f}deg"
+            else:
+                outcome = "failed"
+                detail = f"residual_pos={pos_err_m:.4f}m residual_rot={rot_err_deg:.2f}deg"
         except Exception as exc:
+            detail = str(exc)
             self.get_logger().error(f"Home Zone sequence failed: {exc}")
         finally:
             self._publish_home_zone_active(False)
+            self._publish_motion_result("go_home_zone", outcome, detail)
             for _ in range(5):
                 self._publish_home_zone_zero_twist()
                 time.sleep(0.02)
             self._homing_in_progress = False
+            self._publish_homing_active(False)
             self._home_zone_in_progress = False
 
     def _execute_go_home_sequence(self, home_positions: list[float]) -> None:
+        outcome = "failed"
+        detail = "unknown"
         try:
             home_positions = [float(value) for value in home_positions[:6]]
             duration = float(self.get_parameter("home_duration_sec").value)
@@ -581,18 +632,8 @@ class RobotCommanderNode(Node):
 
             teleop_ctrl = str(self.get_parameter("teleop_controller").value)
             traj_ctrl = str(self.get_parameter("trajectory_controller").value)
-
-            req_to_traj = SwitchController.Request()
-            req_to_traj.activate_controllers = [traj_ctrl]
-            req_to_traj.deactivate_controllers = [teleop_ctrl]
-            req_to_traj.strictness = SwitchController.Request.BEST_EFFORT
-
-            if self._switch_ctrl_client.wait_for_service(timeout_sec=1.0):
-                self.get_logger().info(f"Switching to {traj_ctrl}...")
-                self._switch_ctrl_client.call_async(req_to_traj)
-                time.sleep(0.5)
-            else:
-                self.get_logger().warn("Controller manager not available, attempting to publish anyway.")
+            if not self._switch_home_zone_controllers([traj_ctrl], [teleop_ctrl], timeout_sec=2.0):
+                raise RuntimeError(f"无法切换到 {traj_ctrl}")
 
             trajectory = JointTrajectory()
             trajectory.joint_names = [str(name) for name in self._joint_names[:6]]
@@ -609,17 +650,18 @@ class RobotCommanderNode(Node):
 
             time.sleep(duration + 0.5)
 
-            req_to_teleop = SwitchController.Request()
-            req_to_teleop.activate_controllers = [teleop_ctrl]
-            req_to_teleop.deactivate_controllers = [traj_ctrl]
-            req_to_teleop.strictness = SwitchController.Request.BEST_EFFORT
-
-            if self._switch_ctrl_client.wait_for_service(timeout_sec=1.0):
-                self.get_logger().info(f"Restoring {teleop_ctrl}...")
-                self._switch_ctrl_client.call_async(req_to_teleop)
-                self.get_logger().info("Homing sequence complete. Teleop restored.")
+            if not self._switch_home_zone_controllers([teleop_ctrl], [traj_ctrl], timeout_sec=2.0):
+                raise RuntimeError(f"无法恢复 {teleop_ctrl}")
+            self.get_logger().info("Homing sequence complete. Teleop restored.")
+            outcome = "success"
+            detail = "teleop_restored"
+        except Exception as exc:
+            detail = str(exc)
+            self.get_logger().error(f"Homing sequence failed: {exc}")
         finally:
             self._homing_in_progress = False
+            self._publish_homing_active(False)
+            self._publish_motion_result("go_home", outcome, detail)
 
     def destroy_node(self) -> bool:
         try:
