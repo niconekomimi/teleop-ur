@@ -27,11 +27,10 @@ from ..device_manager import (
 )
 from ..utils.home_zone_utils import (
     compose_pose_with_rpy_offset,
-    drive_pose_target,
     pose_to_string,
     sample_home_zone_pose_offsets,
 )
-from ..utils.ur_kinematics import try_forward_kinematics
+from ..utils.ur_kinematics import try_forward_kinematics, try_inverse_kinematics
 
 
 class RobotCommanderNode(Node):
@@ -389,8 +388,16 @@ class RobotCommanderNode(Node):
             return self._wait_for_home_zone_trajectory_ready(timeout_sec=timeout_sec)
         return True
 
-    def _execute_go_home_for_home_zone_sequence(self, token: int, home_positions: list[float]) -> None:
-        home_positions = [float(value) for value in home_positions[:6]]
+    def _execute_joint_trajectory_sequence(
+        self,
+        target_positions: list[float],
+        *,
+        motion_label: str,
+        token: Optional[int] = None,
+    ) -> bool:
+        target_positions = [float(value) for value in list(target_positions)[:6]]
+        if len(target_positions) < 6:
+            raise RuntimeError(f"{motion_label} 缺少有效关节目标")
         duration = float(self.get_parameter("home_duration_sec").value)
         if duration <= 0.0:
             duration = 3.0
@@ -398,32 +405,34 @@ class RobotCommanderNode(Node):
         teleop_ctrl = str(self.get_parameter("teleop_controller").value)
         traj_ctrl = str(self.get_parameter("trajectory_controller").value)
         if not self._switch_home_zone_controllers([traj_ctrl], [teleop_ctrl], timeout_sec=2.0):
-            raise RuntimeError(f"Home Zone 无法切换到 {traj_ctrl}")
+            raise RuntimeError(f"{motion_label} 无法切换到 {traj_ctrl}")
 
         trajectory = JointTrajectory()
         trajectory.joint_names = [str(name) for name in self._joint_names[:6]]
-
         point = JointTrajectoryPoint()
-        point.positions = home_positions
+        point.positions = target_positions
         seconds = int(duration)
         nanoseconds = int((duration - seconds) * 1e9)
         point.time_from_start = DurationMsg(sec=seconds, nanosec=nanoseconds)
         trajectory.points = [point]
 
         self._home_pub.publish(trajectory)
-        self.get_logger().info(f"Published Home-for-Home-Zone trajectory, waiting {duration:.2f}s...")
+        self.get_logger().info(
+            f"Published {motion_label} trajectory with 1 waypoint, waiting {duration:.2f}s..."
+        )
 
         deadline = time.monotonic() + duration + 0.5
         while time.monotonic() < deadline:
-            if self._home_zone_aborted(token):
-                return
+            if token is not None and self._home_zone_aborted(token):
+                return False
             time.sleep(0.05)
 
-        if self._home_zone_aborted(token):
-            return
+        if token is not None and self._home_zone_aborted(token):
+            return False
         if not self._switch_home_zone_controllers([teleop_ctrl], [traj_ctrl], timeout_sec=2.0):
-            raise RuntimeError(f"Home Zone 无法恢复 {teleop_ctrl}")
-        self.get_logger().info("Home-for-Home-Zone sequence complete. Teleop restored.")
+            raise RuntimeError(f"{motion_label} 无法恢复 {teleop_ctrl}")
+        self.get_logger().info(f"{motion_label} trajectory complete. Teleop restored.")
+        return True
 
     def _ensure_home_zone_servo_started(self) -> None:
         if not self._start_servo_client.wait_for_service(timeout_sec=0.5):
@@ -529,21 +538,10 @@ class RobotCommanderNode(Node):
 
             self._homing_in_progress = True
             self._publish_homing_active(True)
-            self._execute_go_home_for_home_zone_sequence(token, home_positions)
-            self._homing_in_progress = False
-            self._publish_homing_active(False)
-            if self._home_zone_aborted(token):
-                outcome = "cancelled"
-                detail = "aborted_after_home"
-                return
-
-            time.sleep(0.2)
-            self._wait_for_home_zone_teleop_ready(timeout_sec=2.0)
-            time.sleep(0.1)
-            current_pose = self._wait_for_home_zone_pose(timeout_sec=2.0)
-            if current_pose is None:
-                raise RuntimeError("未拿到当前末端位姿，无法执行 Home Zone")
-            current_pos, current_quat = current_pose
+            home_pose = try_forward_kinematics(self._ur_type, home_positions[:6])
+            if home_pose is None:
+                raise RuntimeError("无法根据 Home 关节角计算末端位姿")
+            home_pos, home_quat = home_pose
 
             translation_offset, rotation_offset = sample_home_zone_pose_offsets(
                 list(self.get_parameter("home_zone_translation_min_m").value)[:3],
@@ -552,62 +550,51 @@ class RobotCommanderNode(Node):
                 list(self.get_parameter("home_zone_rotation_max_deg").value)[:3],
             )
             target_pos, target_quat = compose_pose_with_rpy_offset(
-                current_pos,
-                current_quat,
+                home_pos,
+                home_quat,
                 translation_offset,
                 rotation_offset,
             )
             self.get_logger().info(
-                "Home Zone target sampled from current pose: "
+                "Home Zone target sampled from home pose: "
                 f"offset_xyz={np.array2string(translation_offset, precision=4)} "
                 f"offset_rpy_deg={np.array2string(np.rad2deg(rotation_offset), precision=2)} "
                 f"{pose_to_string(target_pos, target_quat)}"
             )
 
-            self._ensure_home_zone_servo_started()
-            max_linear_vel = max(1e-3, float(self.get_parameter("home_zone_max_linear_vel").value))
-            max_angular_vel = max(1e-3, float(self.get_parameter("home_zone_max_angular_vel").value))
-            linear_gain = max(0.1, float(self.get_parameter("home_zone_linear_gain").value))
-            angular_gain = max(0.1, float(self.get_parameter("home_zone_angular_gain").value))
-            position_tolerance_m = max(1e-3, float(self.get_parameter("home_zone_position_tolerance_m").value))
-            rotation_tolerance_deg = max(0.1, float(self.get_parameter("home_zone_rotation_tolerance_deg").value))
-            configured_timeout = float(self.get_parameter("home_zone_timeout_sec").value)
-            dynamic_timeout = max(
-                configured_timeout,
-                2.0 + 1.5 * float(np.linalg.norm(translation_offset)) / max_linear_vel,
-                1.5 + 1.5 * float(np.linalg.norm(rotation_offset)) / max_angular_vel,
-            )
-            success, pos_err_m, rot_err_deg = drive_pose_target(
-                self._get_home_zone_pose_snapshot,
-                self._publish_home_zone_twist,
-                self._publish_home_zone_zero_twist,
+            ik_result = try_inverse_kinematics(
+                self._ur_type,
                 target_pos,
                 target_quat,
-                linear_gain=linear_gain,
-                angular_gain=angular_gain,
-                max_linear_vel=max_linear_vel,
-                max_angular_vel=max_angular_vel,
-                position_tolerance_m=position_tolerance_m,
-                rotation_tolerance_deg=rotation_tolerance_deg,
-                timeout_sec=dynamic_timeout,
-                rate_hz=float(self.get_parameter("home_zone_rate_hz").value),
-                settle_sec=0.15,
-                should_abort_fn=lambda: self._home_zone_aborted(token),
+                home_positions[:6],
+                max_iterations=160,
+                damping=1e-2,
+                max_step_norm=0.2,
+                position_tolerance_m=1e-4,
+                rotation_tolerance_deg=0.5,
             )
-            level = self.get_logger().info if success else self.get_logger().warn
-            level(
-                f"Home Zone {'reached' if success else 'stopped'} "
-                f"residual_pos={pos_err_m:.4f}m residual_rot={rot_err_deg:.2f}deg"
+            if ik_result is None:
+                raise RuntimeError("Home Zone IK 求解失败")
+            target_joints, pos_err_m, rot_err_deg = ik_result
+            self.get_logger().info(
+                "Home Zone IK solved: "
+                f"residual_pos={pos_err_m:.4f}m residual_rot={rot_err_deg:.2f}deg "
+                f"target_joints={np.array2string(target_joints, precision=4)}"
             )
-            if self._home_zone_aborted(token):
+
+            trajectory_completed = self._execute_joint_trajectory_sequence(
+                list(target_joints[:6]),
+                motion_label="home_zone",
+                token=token,
+            )
+
+            if self._home_zone_aborted(token) or not trajectory_completed:
                 outcome = "cancelled"
-                detail = "aborted_during_servo"
-            elif success:
-                outcome = "success"
-                detail = f"residual_pos={pos_err_m:.4f}m residual_rot={rot_err_deg:.2f}deg"
-            else:
-                outcome = "failed"
-                detail = f"residual_pos={pos_err_m:.4f}m residual_rot={rot_err_deg:.2f}deg"
+                detail = "aborted_during_joint_trajectory"
+                return
+
+            outcome = "success"
+            detail = f"ik_residual_pos={pos_err_m:.4f}m ik_residual_rot={rot_err_deg:.2f}deg"
         except Exception as exc:
             detail = str(exc)
             self.get_logger().error(f"Home Zone sequence failed: {exc}")
@@ -626,33 +613,7 @@ class RobotCommanderNode(Node):
         detail = "unknown"
         try:
             home_positions = [float(value) for value in home_positions[:6]]
-            duration = float(self.get_parameter("home_duration_sec").value)
-            if duration <= 0.0:
-                duration = 3.0
-
-            teleop_ctrl = str(self.get_parameter("teleop_controller").value)
-            traj_ctrl = str(self.get_parameter("trajectory_controller").value)
-            if not self._switch_home_zone_controllers([traj_ctrl], [teleop_ctrl], timeout_sec=2.0):
-                raise RuntimeError(f"无法切换到 {traj_ctrl}")
-
-            trajectory = JointTrajectory()
-            trajectory.joint_names = [str(name) for name in self._joint_names[:6]]
-
-            point = JointTrajectoryPoint()
-            point.positions = home_positions
-            seconds = int(duration)
-            nanoseconds = int((duration - seconds) * 1e9)
-            point.time_from_start = DurationMsg(sec=seconds, nanosec=nanoseconds)
-            trajectory.points = [point]
-
-            self._home_pub.publish(trajectory)
-            self.get_logger().info(f"Published home trajectory, waiting {duration:.2f}s...")
-
-            time.sleep(duration + 0.5)
-
-            if not self._switch_home_zone_controllers([teleop_ctrl], [traj_ctrl], timeout_sec=2.0):
-                raise RuntimeError(f"无法恢复 {teleop_ctrl}")
-            self.get_logger().info("Homing sequence complete. Teleop restored.")
+            self._execute_joint_trajectory_sequence(home_positions, motion_label="home")
             outcome = "success"
             detail = "teleop_restored"
         except Exception as exc:

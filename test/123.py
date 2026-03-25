@@ -29,6 +29,14 @@ WIN_NAME = "OAK-D + RealSense 30Hz Test"
 
 exit_flag = False
 
+
+def _oak_socket(name: str):
+    return getattr(dai.CameraBoardSocket, name, None)
+
+
+def _oak_rgb_socket():
+    return _oak_socket("CAM_A") or _oak_socket("RGB")
+
 # -------------------------
 # OAK 共享状态
 # -------------------------
@@ -75,26 +83,35 @@ def build_oak_pipeline():
             message=r".*ColorCamera node is deprecated.*",
         )
         cam = pipeline.create(dai.node.ColorCamera)
+    xout = pipeline.create(dai.node.XLinkOut)
+    xout.setStreamName("rgb")
 
+    rgb_socket = _oak_rgb_socket()
+    if rgb_socket is not None:
+        for attr in ("setBoardSocket", "setCamera"):
+            setter = getattr(cam, attr, None)
+            if callable(setter):
+                setter(rgb_socket)
+                break
     cam.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
     cam.setFps(OAK_FPS)
     cam.setInterleaved(False)
     cam.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)
+    cam.video.link(xout.input)
 
-    q = cam.video.createOutputQueue(maxSize=2, blocking=False)
-    return pipeline, q
+    return pipeline
 
 
-def oak_capture_loop(pipeline, q):
+def oak_capture_loop(pipeline):
     global oak_latest_frame, exit_flag
 
-    pipe_thread = None
+    device = None
     try:
-        pipe_thread = threading.Thread(target=pipeline.run, daemon=True)
-        pipe_thread.start()
+        device = dai.Device(pipeline, dai.UsbSpeed.SUPER)
+        q = device.getOutputQueue("rgb", 2, False)
 
         deadline = time.monotonic() + 5.0
-        while not pipeline.isRunning():
+        while not device.isPipelineRunning():
             if time.monotonic() > deadline:
                 raise RuntimeError("OAK pipeline 未在 5 秒内进入 running 状态")
             time.sleep(0.005)
@@ -115,7 +132,10 @@ def oak_capture_loop(pipeline, q):
             with oak_frame_lock:
                 oak_latest_frame = frame_obj
 
-            hw_ts = frame_obj.getTimestamp().total_seconds()
+            timestamp_getter = getattr(frame_obj, "getTimestampDevice", None)
+            if not callable(timestamp_getter):
+                timestamp_getter = frame_obj.getTimestamp
+            hw_ts = timestamp_getter().total_seconds()
             latency_ms = (now - hw_ts) * 1000.0
 
             if frame_count == 0:
@@ -173,11 +193,10 @@ def oak_capture_loop(pipeline, q):
     finally:
         exit_flag = True
         try:
-            pipeline.stop()
+            if device is not None:
+                device.close()
         except Exception:
             pass
-        if pipe_thread is not None:
-            pipe_thread.join(timeout=1.0)
 
 
 # =========================
@@ -372,9 +391,9 @@ def display_loop():
 # main
 # =========================
 def main():
-    oak_pipeline, oak_q = build_oak_pipeline()
+    oak_pipeline = build_oak_pipeline()
 
-    t_oak = threading.Thread(target=oak_capture_loop, args=(oak_pipeline, oak_q), daemon=True)
+    t_oak = threading.Thread(target=oak_capture_loop, args=(oak_pipeline,), daemon=True)
     t_rs = threading.Thread(target=realsense_capture_loop, daemon=True)
 
     t_oak.start()

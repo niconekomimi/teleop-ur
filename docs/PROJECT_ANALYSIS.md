@@ -259,21 +259,18 @@ GUI / ROS2Worker
 1. 如果 GUI 当前正在执行 inference，`ROS2Worker` 会先停止 inference execution。
 2. 校验当前不在 `homing` / `home_zone` 中。
 3. 标记 `home_zone_active=true`。
-4. 先执行一整套“Home-for-Home-Zone”流程：
-   - trajectory controller 接管
-   - 发送 Home 轨迹
-   - 等待
-   - 切回 teleop controller
-5. 从当前位姿采样 Home Zone 偏移目标。
-6. 调用 `start_servo_service`。
-7. 用 `drive_pose_target()` 循环发布 `TwistStamped` 逼近目标位姿。
-8. 结束时连续发数次零速，并发布 `home_zone_active=false`。
+4. 用 Home 关节角做 FK，得到 Home 末端位姿。
+5. 在 Home 位姿附近采样 Home Zone 偏移目标。
+6. 对目标位姿做 IK，得到目标关节角。
+7. trajectory controller 接管。
+8. 发布一条单点 `JointTrajectory`，从当前姿态直接移动到该目标关节角。
+9. 结束后恢复 teleop controller，并发布 `home_zone_active=false`。
 
 取消方式：
 
 - 当前只支持显式服务取消：`/commander/cancel_home_zone`
 - 节点关闭时也会触发取消
-- **不再支持“新人工输入打断 Home Zone”**
+- **不再经过 Cartesian servo 第二段**
 
 ## 4.4 录制链路
 

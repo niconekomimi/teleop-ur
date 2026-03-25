@@ -22,6 +22,7 @@ evdev>=1.6,<2.0
 mediapipe==0.10.9
 protobuf>=3.20,<4.0
 pynput>=1.7,<2.0
+vuer>=0.1.4,<0.2
 
 # Camera SDK
 depthai>=2.24,<3.0

@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 import os
 import sys
-import threading
 import time
 import warnings
 import statistics  # 新增：用于计算标准差和抖动
@@ -10,6 +9,15 @@ import statistics  # 新增：用于计算标准差和抖动
 os.environ.setdefault("DEPTHAI_SEARCH_TIMEOUT", "5000")
 
 import depthai as dai
+
+
+def _oak_socket(name: str):
+    return getattr(dai.CameraBoardSocket, name, None)
+
+
+def _oak_rgb_socket():
+    return _oak_socket("CAM_A") or _oak_socket("RGB")
+
 
 def _print_depthai_diagnostics() -> None:
     print(f"DepthAI version: {getattr(dai, '__version__', 'unknown')}")
@@ -46,45 +54,46 @@ with warnings.catch_warnings():
         message=r".*ColorCamera node is deprecated.*",
     )
     cam = pipeline.create(dai.node.ColorCamera)
-    
+xout = pipeline.create(dai.node.XLinkOut)
+xout.setStreamName("rgb")
+
 # 设为 1080P 和 30FPS
+rgb_socket = _oak_rgb_socket()
+if rgb_socket is not None:
+    for attr in ("setBoardSocket", "setCamera"):
+        setter = getattr(cam, attr, None)
+        if callable(setter):
+            setter(rgb_socket)
+            break
 cam.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
 cam.setFps(30)
+cam.setInterleaved(False)
+cam.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)
+cam.video.link(xout.input)
 
-q = cam.video.createOutputQueue(maxSize=4, blocking=False)
+device: dai.Device | None = None
+q = None
 
 # 2. 连接设备并测算
 print("正在连接 OAK-D... 请稍候")
 try:
-    run_state: dict[str, Exception] = {}
-    t: threading.Thread | None = None
-
     def _shutdown() -> None:
         try:
-            pipeline.stop()
+            if device is not None:
+                device.close()
         except Exception:
             pass
-        if t is not None:
-            t.join(timeout=1.0)
 
-    def _run_pipeline() -> None:
-        try:
-            pipeline.run()
-        except Exception as exc:
-            run_state["exc"] = exc
-
-    t = threading.Thread(target=_run_pipeline, daemon=True)
-    t.start()
+    device = dai.Device(pipeline, dai.UsbSpeed.SUPER)
+    q = device.getOutputQueue("rgb", 4, False)
 
     deadline = time.monotonic() + 5.0
     while time.monotonic() < deadline:
-        if "exc" in run_state:
-            raise RuntimeError(str(run_state["exc"]))
-        if pipeline.isRunning():
+        if device.isPipelineRunning():
             break
         time.sleep(0.02)
 
-    if not pipeline.isRunning():
+    if not device.isPipelineRunning():
         raise RuntimeError("Pipeline 未在超时时间内进入 running 状态")
 
     print("连接成功！开始输出性能统计报告 (按 Ctrl+C 退出) :\n")
@@ -93,7 +102,6 @@ try:
     count = 0
     window_size = 30  # 每 30 帧（大约 1 秒）输出一次统计报告
     intervals: list[float] = []  # 存放窗口内相邻帧的时间间隔 (Δt, ms)
-    prev_arrival_time: float | None = None  # 全局上一帧到达时间（用于更新）
     window_first_arrival_time: float | None = None
     window_last_arrival_time: float | None = None
     window_prev_arrival_time: float | None = None
@@ -101,10 +109,14 @@ try:
 
     while True:
         # 阻塞获取帧
+        assert q is not None
         frame = q.get()
 
         host_arrival_time = time.monotonic()
-        hardware_exposure_time = frame.getTimestamp().total_seconds()
+        timestamp_getter = getattr(frame, "getTimestampDevice", None)
+        if not callable(timestamp_getter):
+            timestamp_getter = frame.getTimestamp
+        hardware_exposure_time = timestamp_getter().total_seconds()
         
         # 1. 计算单帧底层物理延迟
         latency_ms = (host_arrival_time - hardware_exposure_time) * 1000
@@ -121,7 +133,6 @@ try:
             window_prev_arrival_time = host_arrival_time
             window_last_arrival_time = host_arrival_time
 
-        prev_arrival_time = host_arrival_time
         window_frame_count += 1
         count += 1
 

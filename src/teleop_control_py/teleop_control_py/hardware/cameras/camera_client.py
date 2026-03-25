@@ -252,17 +252,7 @@ class OAKClient(BaseCamera):
         os.environ.setdefault("DEPTHAI_SEARCH_TIMEOUT", "3000")
 
         device_info = dai.DeviceInfo(self._serial_number) if self._serial_number else None
-        if device_info is not None:
-            self._device = dai.Device(device_info, dai.UsbSpeed.SUPER)
-        else:
-            self._device = dai.Device(dai.UsbSpeed.SUPER)
-
-        try:
-            self._calib = self._device.readCalibration()
-        except Exception:
-            self._calib = None
-
-        self._pipeline = dai.Pipeline(self._device)
+        self._pipeline = dai.Pipeline()
         with warnings.catch_warnings():
             warnings.filterwarnings(
                 "ignore",
@@ -270,6 +260,8 @@ class OAKClient(BaseCamera):
                 message=r".*ColorCamera node is deprecated.*",
             )
             color = self._pipeline.create(dai.node.ColorCamera)
+        xout_rgb = self._pipeline.create(dai.node.XLinkOut)
+        xout_rgb.setStreamName("rgb")
 
         _oak_set_socket(color, _oak_rgb_socket())
         color.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
@@ -277,12 +269,12 @@ class OAKClient(BaseCamera):
         color.setInterleaved(False)
         color.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)
         self._rgb_resolution = (1920, 1080)
+        color.video.link(xout_rgb.input)
 
         if self._enable_depth:
             mono_left = self._pipeline.create(dai.node.MonoCamera)
             mono_right = self._pipeline.create(dai.node.MonoCamera)
             stereo = self._pipeline.create(dai.node.StereoDepth)
-            xout_rgb = self._pipeline.create(dai.node.XLinkOut)
             xout_depth = self._pipeline.create(dai.node.XLinkOut)
 
             _oak_set_socket(mono_left, _oak_left_socket())
@@ -305,23 +297,33 @@ class OAKClient(BaseCamera):
             if hasattr(stereo, "setOutputSize"):
                 stereo.setOutputSize(*self._rgb_resolution)
 
-            xout_rgb.setStreamName("rgb")
             xout_depth.setStreamName("depth")
-            color.video.link(xout_rgb.input)
             mono_left.out.link(stereo.left)
             mono_right.out.link(stereo.right)
             stereo.depth.link(xout_depth.input)
-        else:
-            self._rgb_queue = color.video.createOutputQueue(maxSize=1, blocking=False)
 
-        self._pipeline.start()
+        if device_info is not None:
+            self._device = dai.Device(self._pipeline, device_info, dai.UsbSpeed.SUPER)
+        else:
+            self._device = dai.Device(self._pipeline, dai.UsbSpeed.SUPER)
+
+        try:
+            self._calib = self._device.readCalibration()
+        except Exception:
+            self._calib = None
+
+        self._rgb_queue = _oak_output_queue(self._device, "rgb", max_size=1)
         if self._enable_depth:
-            self._rgb_queue = _oak_output_queue(self._device, "rgb", max_size=1)
             self._depth_queue = _oak_output_queue(self._device, "depth", max_size=1)
 
         usb_speed = self._device.getUsbSpeed()
         _log(self._logger, "info", f"OAK-D USB speed: {usb_speed.name}")
-        if not self._pipeline.isRunning():
+        is_running = True
+        if hasattr(self._device, "isPipelineRunning"):
+            is_running = bool(self._device.isPipelineRunning())
+        elif hasattr(self._pipeline, "isRunning"):
+            is_running = bool(self._pipeline.isRunning())
+        if not is_running:
             self._device.close()
             self._device = None
             self._pipeline = None

@@ -1,0 +1,42 @@
+quest3_webxr_bridge_node:
+  ros__parameters:
+    # WebXR / Vuer websocket server
+    vuer_host: "0.0.0.0"
+    vuer_port: 8012
+    vuer_client_domain: "https://vuer.ai"
+
+    # The LAN host/IP that Quest should use to reach this PC.
+    # Leave empty to auto-detect.
+    advertised_host: "10.16.6.247"
+
+    # Default mode: auto-generate a local self-signed certificate and serve
+    # Quest directly over https/wss on the same port.
+    auto_generate_self_signed_cert: false
+    tls_workdir: "/tmp/teleop_control_py/quest3_webxr_tls"
+
+    # If you instead expose the bridge through ngrok / localtunnel / your own
+    # TLS proxy, put the public secure websocket URL here so the node can print
+    # the full Quest browser entry URL:
+    #   https://vuer.ai?ws=<public_wss_url>
+    public_wss_url: ""
+
+    # Optional custom TLS files. If left empty and auto_generate_self_signed_cert
+    # is true, the node generates a local certificate automatically.
+    ssl_cert_file: ""
+    ssl_key_file: ""
+
+    stream_key: "quest3-controllers"
+    stream_left: true
+    stream_right: true
+
+    publish_rate_hz: 90.0
+    stale_timeout_sec: 0.5
+    frame_id: "quest3_world"
+
+    left_pose_topic: "/quest3/left_controller/pose"
+    right_pose_topic: "/quest3/right_controller/pose"
+    left_matrix_topic: "/quest3/left_controller/matrix"
+    right_matrix_topic: "/quest3/right_controller/matrix"
+    joy_topic: "/quest3/input/joy"
+    connected_topic: "/quest3/connected"
+    debug_log_all_vuer_events: true

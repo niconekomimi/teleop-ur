@@ -11,9 +11,9 @@ teleop_gui:
     - xbox
     - ps5
     - generic
-    default_mediapipe_input_topic: /d435/camera/color/image_raw
-    default_mediapipe_camera: d435
-    default_mediapipe_camera_serial_number: '327122070172'
+    default_mediapipe_input_topic: /d455/camera/color/image_raw
+    default_mediapipe_camera: d455
+    default_mediapipe_camera_serial_number: '146222254305'
     mediapipe_camera_options:
     - d435
     - d455
@@ -24,13 +24,13 @@ teleop_gui:
     default_collector_global_camera_model: d455
     default_collector_global_camera_serial_number: '146222254305'
     default_collector_wrist_camera_model: oakd
-    default_collector_wrist_camera_serial_number: ''
+    default_collector_wrist_camera_serial_number: 1944301081F3181300
     default_inference_global_camera_source: realsense
     default_inference_global_camera_model: d455
     default_inference_global_camera_serial_number: '146222254305'
     default_inference_wrist_camera_source: oakd
     default_inference_wrist_camera_model: oakd
-    default_inference_wrist_camera_serial_number: ''
+    default_inference_wrist_camera_serial_number: 1944301081F3181300
     camera_driver_options:
     - realsense
     - oakd

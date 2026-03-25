@@ -32,13 +32,16 @@ teleop_control_node:
     startup_retry_period_sec: 1.0
 
     # 速度 / 加速度限幅。
-    max_linear_vel: 0.5
-    max_angular_vel: 1.0
-    max_linear_accel: 4.0
-    max_angular_accel: 8.0
+    # 参考 ROS 官方 teleop_twist_joy 常见 xbox / ps3-holonomic 示例：
+    # 常速 linear 常落在 0.4~0.7，angular 常落在 0.4~0.5，并配 enable/turbo。
+    # 当前系统还没有 turbo 档，这里先迁一版“保守常速 + 更细中段”的手感来试。
+    max_linear_vel: 0.8
+    max_angular_vel: 1.5
+    max_linear_accel: 6.0
+    max_angular_accel: 12.0
     # 松手后回零时使用的加速度倍率。
     # 越小回零越慢、更柔和；越大回零越快。1.0 表示和正常加速同样快。
-    zero_return_accel_scale: 0.70
+    zero_return_accel_scale: 3.0
 
     # ==========================================================
     # 3) Joy 手柄输入
@@ -48,7 +51,7 @@ teleop_control_node:
 
     # linear | cubic
     joy_deadzone: 0.05
-    joy_curve: "linear"
+    joy_curve: "cubic"
 
     joy_deadman_enabled: false
     deadman_button: -1
@@ -61,6 +64,14 @@ teleop_control_node:
     linear_z_axis: -1
     linear_z_up_axis: 4
     linear_z_down_axis: 5
+    # Z 轴由扳机控制时单独降速，并在松手回弹时做“释放吸附到 0”。
+    # 如果曾经是深按状态，只要检测到明显从峰值回落，就直接切 0，吃掉扳机慢回弹尾巴。
+    linear_z_scale: 0.5
+    linear_z_trigger_deadzone: 0.12
+    linear_z_trigger_release_deadzone: 0.99
+    linear_z_trigger_snap_release_threshold: 0.99
+    linear_z_trigger_snap_release_drop: 0.99
+    linear_z_zero_return_accel_scale: 9.0
     linear_axis_sign: [-1.0, -1.0, 1.0]
 
     angular_x_axis: 3

@@ -176,6 +176,19 @@ class JoyInputHandler(InputHandlerBase):
         ]
         self._linear_z_up_axis = int(node.get_parameter("linear_z_up_axis").value)
         self._linear_z_down_axis = int(node.get_parameter("linear_z_down_axis").value)
+        self._linear_z_scale = float(node.get_parameter("linear_z_scale").value)
+        self._linear_z_trigger_deadzone = float(node.get_parameter("linear_z_trigger_deadzone").value)
+        self._linear_z_trigger_release_deadzone = max(
+            self._linear_z_trigger_deadzone,
+            float(node.get_parameter("linear_z_trigger_release_deadzone").value),
+        )
+        self._linear_z_trigger_snap_release_threshold = max(
+            self._linear_z_trigger_deadzone,
+            float(node.get_parameter("linear_z_trigger_snap_release_threshold").value),
+        )
+        self._linear_z_trigger_snap_release_drop = max(
+            0.0, float(node.get_parameter("linear_z_trigger_snap_release_drop").value)
+        )
         self._angular_axes = [
             int(node.get_parameter("angular_x_axis").value),
             int(node.get_parameter("angular_y_axis").value),
@@ -196,16 +209,22 @@ class JoyInputHandler(InputHandlerBase):
         self._gripper_open_button = int(node.get_parameter("gripper_open_button").value)
         self._gripper_axis_inverted = bool(node.get_parameter("gripper_axis_inverted").value)
         self._last_deadman_active = False
+        # 扳机回弹时常会在 0 附近拖尾；这里记忆上一帧原始值，
+        # 让 Z 轴在“释放到一定阈值以下”时直接吸附回 0，并且只在新一轮按下时重新激活。
+        self._linear_z_trigger_prev_raw = [0.0, 0.0]
+        self._linear_z_trigger_active = [False, False]
+        self._linear_z_trigger_peak_raw = [0.0, 0.0]
 
         node.create_subscription(Joy, self._joy_topic, self._joy_callback, qos_profile_sensor_data)
 
-    def _axis_value(self, values: Sequence[float], index: int) -> float:
+    def _axis_value(self, values: Sequence[float], index: int, *, deadzone: Optional[float] = None) -> float:
         if index < 0 or index >= len(values):
             return 0.0
         raw = float(values[index])
+        resolved_deadzone = self._deadzone if deadzone is None else float(deadzone)
         if self._curve == "cubic":
-            return map_axis_nonlinear(raw, deadzone=self._deadzone, exponent=3.0, scale=1.0)
-        return map_axis_linear(raw, deadzone=self._deadzone, scale=1.0)
+            return map_axis_nonlinear(raw, deadzone=resolved_deadzone, exponent=3.0, scale=1.0)
+        return map_axis_linear(raw, deadzone=resolved_deadzone, scale=1.0)
 
     def _button_value(self, values: Sequence[int], index: int) -> bool:
         return 0 <= index < len(values) and bool(values[index])
@@ -219,9 +238,50 @@ class JoyInputHandler(InputHandlerBase):
             return -1.0
         return 0.0
 
+    def _raw_axis_value(self, values: Sequence[float], index: int) -> float:
+        if index < 0 or index >= len(values):
+            return 0.0
+        return float(_clamp(float(values[index]), 0.0, 1.0))
+
+    def _trigger_component(self, axes: Sequence[float], axis_index: int, state_index: int) -> float:
+        raw = self._raw_axis_value(axes, axis_index)
+        prev_raw = self._linear_z_trigger_prev_raw[state_index]
+        rising = raw > (prev_raw + 1e-3)
+        falling = raw < (prev_raw - 1e-3)
+        active = self._linear_z_trigger_active[state_index]
+        peak_raw = self._linear_z_trigger_peak_raw[state_index]
+
+        if active and falling and raw <= self._linear_z_trigger_release_deadzone:
+            active = False
+            peak_raw = 0.0
+
+        if (not active) and rising and prev_raw <= self._linear_z_trigger_deadzone and raw >= self._linear_z_trigger_deadzone:
+            active = True
+            peak_raw = raw
+
+        if active:
+            peak_raw = max(peak_raw, raw)
+            # 扳机深按后直接松手时，硬件常会缓慢回弹；只要确认已经明显从峰值回落，就立即切到 0。
+            if (
+                falling
+                and
+                peak_raw >= self._linear_z_trigger_snap_release_threshold
+                and raw <= (peak_raw - self._linear_z_trigger_snap_release_drop)
+            ):
+                active = False
+                peak_raw = 0.0
+
+        self._linear_z_trigger_prev_raw[state_index] = raw
+        self._linear_z_trigger_active[state_index] = active
+        self._linear_z_trigger_peak_raw[state_index] = peak_raw
+
+        if not active:
+            return 0.0
+        return self._axis_value(axes, axis_index, deadzone=self._linear_z_trigger_deadzone)
+
     def _trigger_axis(self, axes: Sequence[float], positive_axis: int, negative_axis: int) -> float:
-        positive = self._axis_value(axes, positive_axis)
-        negative = self._axis_value(axes, negative_axis)
+        positive = self._trigger_component(axes, positive_axis, 0)
+        negative = self._trigger_component(axes, negative_axis, 1)
         return float(_clamp(positive - negative, -1.0, 1.0))
 
     def _deadman_active(self, axes: Sequence[float], buttons: Sequence[int]) -> bool:
@@ -258,7 +318,7 @@ class JoyInputHandler(InputHandlerBase):
             linear = [
                 self._axis_value(axes, self._linear_axes[0]) * self._linear_sign[0] * self._max_linear,
                 self._axis_value(axes, self._linear_axes[1]) * self._linear_sign[1] * self._max_linear,
-                linear_z * self._linear_sign[2] * self._max_linear,
+                linear_z * self._linear_sign[2] * self._max_linear * self._linear_z_scale,
             ]
             angular = [
                 self._axis_value(axes, self._angular_axes[0]) * self._angular_sign[0] * self._max_angular,

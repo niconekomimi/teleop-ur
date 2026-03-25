@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QMessageBox,
     QInputDialog,
+    QMenu,
     QProgressDialog,
     QWidget,
 )
@@ -186,6 +187,11 @@ class HDF5ViewerDialog(QDialog):
         self.lbl_agent.setStyleSheet("background-color: #202020; color: white; border-radius: 4px;")
         self.lbl_agent.setMinimumHeight(220)
         self.lbl_agent.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.lbl_agent.setToolTip("右键可保存当前帧图像")
+        self.lbl_agent.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.lbl_agent.customContextMenuRequested.connect(
+            lambda pos: self._show_camera_context_menu("agent", self.lbl_agent.mapToGlobal(pos))
+        )
         agent_layout.addWidget(global_title)
         agent_layout.addWidget(self.lbl_agent)
 
@@ -201,6 +207,11 @@ class HDF5ViewerDialog(QDialog):
         self.lbl_wrist.setStyleSheet("background-color: #202020; color: white; border-radius: 4px;")
         self.lbl_wrist.setMinimumHeight(220)
         self.lbl_wrist.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.lbl_wrist.setToolTip("右键可保存当前帧图像")
+        self.lbl_wrist.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.lbl_wrist.customContextMenuRequested.connect(
+            lambda pos: self._show_camera_context_menu("wrist", self.lbl_wrist.mapToGlobal(pos))
+        )
         wrist_layout.addWidget(wrist_title)
         wrist_layout.addWidget(self.lbl_wrist)
 
@@ -867,6 +878,69 @@ class HDF5ViewerDialog(QDialog):
     def goto_next_demo(self):
         self.pause_playback()
         self._switch_demo_by_offset(1)
+
+    def _camera_file_stem(self, camera_key):
+        return "agentview" if camera_key == "agent" else "eye_in_hand"
+
+    def _camera_display_name(self, camera_key):
+        return "全局相机" if camera_key == "agent" else "手部相机"
+
+    def _camera_source_pixmap(self, camera_key):
+        if camera_key == "agent":
+            return self._agent_source_pixmap
+        return self._wrist_source_pixmap
+
+    def _current_source_frame_index(self):
+        if self.current_demo_name is None:
+            return None
+        crop_start, _ = self._effective_crop_range(self.current_demo_name)
+        return crop_start + self.slider.value()
+
+    def _default_camera_save_path(self, camera_key):
+        base_dir = os.path.dirname(self.hdf5_path) if self.hdf5_path else os.getcwd()
+        dataset_stem = Path(self.hdf5_path).stem if self.hdf5_path else "hdf5_frame"
+        demo_name = self.current_demo_name or "demo"
+        source_idx = self._current_source_frame_index()
+        frame_part = f"frame_{source_idx + 1:06d}" if source_idx is not None else "frame_unknown"
+        file_name = f"{dataset_stem}_{demo_name}_{self._camera_file_stem(camera_key)}_{frame_part}.png"
+        return str(Path(base_dir) / file_name)
+
+    def _show_camera_context_menu(self, camera_key, global_pos):
+        pixmap = self._camera_source_pixmap(camera_key)
+        if pixmap.isNull():
+            return
+
+        menu = QMenu(self)
+        save_action = menu.addAction("保存当前图像")
+        selected_action = menu.exec(global_pos)
+        if selected_action == save_action:
+            self._save_camera_frame(camera_key)
+
+    def _save_camera_frame(self, camera_key):
+        pixmap = self._camera_source_pixmap(camera_key)
+        if pixmap.isNull():
+            QMessageBox.warning(self, "无可保存图像", "当前帧没有可保存的图像。")
+            return
+
+        suggested_path = self._default_camera_save_path(camera_key)
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            f"保存{self._camera_display_name(camera_key)}图像",
+            suggested_path,
+            "PNG Files (*.png);;JPEG Files (*.jpg *.jpeg);;BMP Files (*.bmp);;All Files (*)",
+        )
+        if not file_path:
+            return
+
+        save_path = Path(file_path)
+        if not save_path.suffix:
+            save_path = save_path.with_suffix(".png")
+
+        if not pixmap.save(str(save_path)):
+            QMessageBox.critical(self, "保存失败", f"无法保存图像到:\n{save_path}")
+            return
+
+        QMessageBox.information(self, "保存成功", f"图像已保存到:\n{save_path}")
 
     def _set_camera_pixmap(self, label, pixmap):
         if pixmap.isNull():

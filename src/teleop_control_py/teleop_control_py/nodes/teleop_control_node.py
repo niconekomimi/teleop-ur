@@ -75,6 +75,9 @@ class TeleopControlNode(Node):
             dtype=np.float64,
         )
         self._zero_return_accel_scale = max(0.01, float(self.get_parameter("zero_return_accel_scale").value))
+        self._linear_z_zero_return_accel_scale = max(
+            0.01, float(self.get_parameter("linear_z_zero_return_accel_scale").value)
+        )
         self._last_twist_vec = np.zeros(6, dtype=np.float64)
         self._last_loop_time = time.monotonic()
         self._home_zone_active = False
@@ -105,7 +108,8 @@ class TeleopControlNode(Node):
         self.get_logger().info(
             f"TeleopControlNode ready. robot_profile={self._robot_profile.name}, input_type={self._input_type}, "
             f"gripper_type={self._gripper_type}, control_hz={self._control_hz:.1f}, "
-            f"zero_return_accel_scale={self._zero_return_accel_scale:.2f}"
+            f"zero_return_accel_scale={self._zero_return_accel_scale:.2f}, "
+            f"linear_z_zero_return_accel_scale={self._linear_z_zero_return_accel_scale:.2f}"
         )
 
     def _declare_parameters(self, robot_profile) -> None:
@@ -144,6 +148,12 @@ class TeleopControlNode(Node):
         self.declare_parameter("linear_z_axis", -1)
         self.declare_parameter("linear_z_up_axis", 4)
         self.declare_parameter("linear_z_down_axis", 5)
+        self.declare_parameter("linear_z_scale", 1.0)
+        self.declare_parameter("linear_z_trigger_deadzone", 0.05)
+        self.declare_parameter("linear_z_trigger_release_deadzone", 0.05)
+        self.declare_parameter("linear_z_trigger_snap_release_threshold", 0.80)
+        self.declare_parameter("linear_z_trigger_snap_release_drop", 0.08)
+        self.declare_parameter("linear_z_zero_return_accel_scale", 1.0)
         self.declare_parameter("linear_z_up_button", 1)
         self.declare_parameter("linear_z_down_button", 0)
         self.declare_parameter("angular_x_axis", 3)
@@ -275,6 +285,8 @@ class TeleopControlNode(Node):
         effective_acceleration = self._max_acceleration.copy()
         zero_axes = np.isclose(target_vec, 0.0, atol=1e-6)
         effective_acceleration[zero_axes] *= self._zero_return_accel_scale
+        if zero_axes[2]:
+            effective_acceleration[2] *= self._linear_z_zero_return_accel_scale
         limited_vec = apply_velocity_limits(
             target=target_vec,
             previous=self._last_twist_vec,

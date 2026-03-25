@@ -196,6 +196,21 @@ class DataCollectorNode(Node):
             self._wrist_camera_serial_number,
             enable_depth=self._wrist_camera_enable_depth,
         )
+        camera_start_failures: list[str] = []
+        if self.global_cam is None:
+            camera_start_failures.append(
+                "global="
+                f"{global_source}(serial={self._global_camera_serial_number or 'auto'}, depth={self._global_camera_enable_depth})"
+            )
+        if self.wrist_cam is None:
+            camera_start_failures.append(
+                "wrist="
+                f"{wrist_source}(serial={self._wrist_camera_serial_number or 'auto'}, depth={self._wrist_camera_enable_depth})"
+            )
+        if camera_start_failures:
+            raise RuntimeError(
+                "数据采集节点启动失败，以下相机初始化失败: " + ", ".join(camera_start_failures)
+            )
         self._global_camera_source = global_source
         self._wrist_camera_source = wrist_source
         self._sync_hub = SyncHub(

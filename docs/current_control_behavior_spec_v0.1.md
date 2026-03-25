@@ -345,17 +345,13 @@ GuiAppService.start_teleop()
 4. `robot_commander_node` 标记：
    - `home_zone_active=true`
    - `homing_active=true`
-5. 先执行 `Home-for-Home-Zone`：
-   - 切 trajectory controller
-   - 发送 Home 轨迹
-   - 等待
+5. 读取配置中的 Home 关节角，并用 FK 计算 Home 末端位姿。
+6. 在 Home 位姿附近采样平移和旋转偏移。
+7. 对偏移后的目标位姿做 IK，求出目标关节角。
+8. 切 trajectory controller。
+9. 发布一条单点 `JointTrajectory`，从当前姿态直接移动到该目标关节角。
+10. 成功或取消后：
    - 恢复 teleop controller
-6. 等待当前位姿可用。
-7. 在 Home 位姿附近采样平移和旋转偏移。
-8. 调用 `start_servo_service`。
-9. 使用 `drive_pose_target()` 循环发布 `TwistStamped`。
-10. 成功、超时或取消后：
-   - 连续发送零速
    - `home_zone_active=false`
    - 发布 motion result
 
@@ -364,9 +360,9 @@ GuiAppService.start_teleop()
 - `/commander/cancel_home_zone`
 - 节点关闭时自动取消
 
-当前不支持：
+当前说明：
 
-- 新人工输入自动打断 Home Zone
+- 不再经过 Cartesian servo 第二段。
 
 ## 4.6 录制流程
 
