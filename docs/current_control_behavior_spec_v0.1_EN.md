@@ -309,9 +309,9 @@ Flow:
 
 Current default semantics:
 
-- `active_hand = right`
-- right-hand `squeeze / grip` acts as clutch
-- right-hand `trigger` acts as gripper
+- `active_hand = left`
+- left-hand `squeeze / grip` acts as clutch
+- left-hand `trigger` acts as gripper
 - input-side low-pass smoothing is disabled by default
 - `frame reset` is scoped to `active_hand` by default
 

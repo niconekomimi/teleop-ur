@@ -50,9 +50,9 @@ That means:
 
 Default interaction semantics:
 
-- `active_hand = right`
-- right-hand `grip / squeeze`: clutch
-- right-hand `trigger`: gripper
+- `active_hand = left`
+- left-hand `grip / squeeze`: clutch
+- left-hand `trigger`: gripper
 - default `orientation_mode = hand_relative`
 
 This is closer to mature VR-controller teleop systems such as Quest2ROS than to a vision-hand-filtering pipeline.
@@ -66,6 +66,7 @@ Default parameters:
 - `quest3_frame_reset_enabled: true`
 - `quest3_frame_reset_scope: "active_hand"`
 - `quest3_frame_reset_hold_sec: 0.75`
+- `quest3_frame_reset_rotate_position: false`
 
 Default button combos:
 
@@ -76,7 +77,15 @@ Behavior semantics:
 
 - hold the combo for about `0.75s`
 - the current controller pose for that hand becomes the new relative reference frame
+- by default, only the translation origin and orientation zero-point are reset; the translation axes are not additionally rotated by that orientation reset
 - later `clutch / pose delta / hand_relative orientation` behavior is interpreted inside that new frame
+
+Notes:
+
+- `quest3_frame_reset_rotate_position: false`
+  is the better fit for this project. It avoids the parasitic coupling where resetting while the wrist is yawed makes later pure translation drift diagonally.
+- `quest3_frame_reset_rotate_position: true`
+  is closer to Quest2ROS-style full-frame remapping, where both translation and orientation are moved into the new frame.
 
 This is not the same as `clutch`:
 
@@ -259,6 +268,7 @@ Important Quest parameters:
 - `quest3_enable_input_smoothing`
 - `quest3_frame_reset_enabled`
 - `quest3_frame_reset_scope`
+- `quest3_frame_reset_rotate_position`
 - `quest3_left_frame_reset_buttons`
 - `quest3_right_frame_reset_buttons`
 

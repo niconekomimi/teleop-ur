@@ -96,7 +96,7 @@ teleop_control_node:
     quest3_joy_topic: "/quest3/input/joy"
     quest3_require_connected: true
     quest3_pose_timeout_sec: 0.3
-    quest3_active_hand: "right"
+    quest3_active_hand: "left"
     # Quest 控制器遥操作优先使用相对位姿 + clutch 的 target_pose 模式。
     # 这是比视觉手势更稳定的主流做法：按住 clutch 时记录手柄/机器人起点，
     # 再用手柄相对位姿持续驱动 TCP 目标位姿。
@@ -128,6 +128,9 @@ teleop_control_node:
     # active_hand: 只允许当前控制手做 frame reset；both: 左右手都可单独重置。
     quest3_frame_reset_scope: "active_hand"
     quest3_frame_reset_hold_sec: 0.75
+    # false: 只重置平移零点，不让姿态零点把后续平移轴也一起旋转，避免斜向漂移。
+    # true: 使用 Quest2ROS 式 full-frame 重映射，平移和姿态都会进入新参考系。
+    quest3_frame_reset_rotate_position: false
     quest3_left_frame_reset_buttons: [4, 5]   # X + Y
     quest3_right_frame_reset_buttons: [10, 11]  # A + B
     quest3_clutch_filter_enabled: true

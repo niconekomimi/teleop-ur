@@ -28,70 +28,9 @@ Current default stack:
 
 ## Architecture
 
-The following Mermaid diagram is the intended top-level architecture used by the project. The current implementation has already landed a large part of it, while some runtime responsibilities are still split across ROS nodes and the GUI bridge.
+The figure below is the current top-level architecture overview. The README uses a static `SVG` so the layout stays clean on the web, instead of relying on a large Mermaid graph. For detailed runtime behavior, see [docs/PROJECT_ANALYSIS_EN.md](docs/PROJECT_ANALYSIS_EN.md).
 
-```mermaid
-flowchart TD
-    classDef ui fill:#e3f2fd,stroke:#1e88e5,stroke-width:2px,color:#000
-    classDef core fill:#fff3e0,stroke:#fb8c00,stroke-width:2px,color:#000
-    classDef backend fill:#e8f5e9,stroke:#43a047,stroke-width:2px,color:#000
-    classDef hw fill:#f3e5f5,stroke:#8e24aa,stroke-width:2px,color:#000
-
-    subgraph TaskLayer ["GUI / Task Layer"]
-        UI["GUI Main Window<br/>(intent only)"]:::ui
-        Editor["Offline Dataset Editor"]:::ui
-    end
-
-    subgraph CoreLayer ["Core Layer"]
-        Orchestrator["SystemOrchestrator / StateMachine"]:::core
-        MUX{"MUX"}:::core
-        SyncHub["SyncHub"]:::core
-        Recorder["Recorder"]:::core
-        Infer["InferenceService"]:::core
-        Commander["Commander / SafetyManager"]:::core
-
-        subgraph DeviceManager ["DeviceManager / Adapters"]
-            direction LR
-            InBE["InputBackend"]:::backend
-            ArmBE["ArmBackend"]:::backend
-            GripBE["GripperBackend"]:::backend
-            CamBE["CameraBackend"]:::backend
-        end
-    end
-
-    subgraph HardwareLayer ["Hardware Layer"]
-        direction LR
-        JoyHW["Joy / MediaPipe"]:::hw
-        RobotHW["UR5 / Franka / Aubo<br/>(Driver + MoveIt Servo)"]:::hw
-        GripHW["Robotiq / qbSoftHand"]:::hw
-        CamHW["RealSense / OAK-D<br/>(SDK / SHM)"]:::hw
-    end
-
-    UI --> Orchestrator
-    Orchestrator --> MUX
-    Orchestrator --> Recorder
-    Orchestrator --> Infer
-    Orchestrator --> SyncHub
-    Orchestrator --> Commander
-
-    InBE -->|"ActionCommand"| MUX
-    Infer -->|"ActionCommand"| MUX
-    Commander -->|"High-priority control"| MUX
-
-    MUX -->|"send_delta_twist()"| ArmBE
-    MUX -->|"set_gripper()"| GripBE
-
-    SyncHub -->|"Observation snapshot"| Recorder
-    SyncHub -->|"Observation snapshot"| Infer
-    SyncHub -->|"robot state"| ArmBE
-    SyncHub -->|"gripper state"| GripBE
-    SyncHub -->|"camera frame"| CamBE
-
-    InBE -.-> JoyHW
-    ArmBE -.-> RobotHW
-    GripBE -.-> GripHW
-    CamBE -.-> CamHW
-```
+![Architecture Overview](docs/assets/architecture_overview.svg)
 
 Implementation notes:
 
@@ -143,6 +82,8 @@ Recommended entry:
 ```bash
 ros2 run teleop_control_py teleop_gui
 ```
+
+![GUI Preview](GUI.png)
 
 ## GUI Workflow
 

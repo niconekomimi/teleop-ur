@@ -50,9 +50,9 @@
 
 默认交互语义：
 
-- `active_hand = right`
-- 右手 `grip / squeeze`：clutch
-- 右手 `trigger`：夹爪
+- `active_hand = left`
+- 左手 `grip / squeeze`：clutch
+- 左手 `trigger`：夹爪
 - 默认 `orientation_mode = hand_relative`
 
 这套思路更接近 Quest2ROS 一类成熟 VR controller teleop，而不是视觉手势滤波链路。
@@ -66,6 +66,7 @@
 - `quest3_frame_reset_enabled: true`
 - `quest3_frame_reset_scope: "active_hand"`
 - `quest3_frame_reset_hold_sec: 0.75`
+- `quest3_frame_reset_rotate_position: false`
 
 默认按钮：
 
@@ -76,7 +77,15 @@
 
 - 长按组合键约 `0.75s`
 - 把当前该手控制器姿态记为新的相对参考系
+- 默认只重置平移零点和姿态零点，不把姿态零点再额外旋进后续平移轴
 - 之后的 `clutch / pose delta / hand_relative orientation` 都基于这个参考系解释
+
+补充说明：
+
+- `quest3_frame_reset_rotate_position: false`
+  适合当前项目。它避免“reset 时手柄有偏航，之后纯前推却变成斜着走”的寄生耦合。
+- `quest3_frame_reset_rotate_position: true`
+  更接近 Quest2ROS 的 full-frame 重映射，平移和姿态都会一起进入新参考系。
 
 这和 `clutch` 不是一回事：
 
@@ -259,6 +268,7 @@ Quest 遥操作主要参数都在：
 - `quest3_enable_input_smoothing`
 - `quest3_frame_reset_enabled`
 - `quest3_frame_reset_scope`
+- `quest3_frame_reset_rotate_position`
 - `quest3_left_frame_reset_buttons`
 - `quest3_right_frame_reset_buttons`
 

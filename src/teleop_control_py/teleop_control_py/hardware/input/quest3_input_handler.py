@@ -19,10 +19,12 @@ from .input_handlers import InputHandlerBase, _LowPassFilter, _zero_twist
 from ...utils.home_zone_utils import compute_pose_error
 from ...utils.transform_utils import (
     _clamp,
-    quat_conjugate_xyzw,
+    apply_deadzone,
     quat_multiply_xyzw,
     quat_normalize_xyzw,
-    quat_to_rotmat_xyzw,
+    quat_to_shortest_rotvec_xyzw,
+    rebase_pose_with_origin_xyzw,
+    relative_body_quat_delta_xyzw,
     rotvec_to_quat_xyzw,
 )
 
@@ -64,7 +66,7 @@ class Quest3InputHandler(InputHandlerBase):
 
         self._active_hand = str(node.get_parameter("quest3_active_hand").value).strip().lower()
         if self._active_hand not in {"left", "right"}:
-            self._active_hand = "right"
+            self._active_hand = "left"
 
         self._require_connected = bool(node.get_parameter("quest3_require_connected").value)
         self._pose_timeout_sec = max(0.05, float(node.get_parameter("quest3_pose_timeout_sec").value))
@@ -94,6 +96,7 @@ class Quest3InputHandler(InputHandlerBase):
         if self._frame_reset_scope not in {"active_hand", "both"}:
             self._frame_reset_scope = "active_hand"
         self._frame_reset_hold_sec = max(0.0, float(node.get_parameter("quest3_frame_reset_hold_sec").value))
+        self._frame_reset_rotate_position = bool(node.get_parameter("quest3_frame_reset_rotate_position").value)
         self._frame_reset_buttons = {
             "left": self._index_list_param("quest3_left_frame_reset_buttons", [4, 5]),
             "right": self._index_list_param("quest3_right_frame_reset_buttons", [10, 11]),
@@ -159,7 +162,8 @@ class Quest3InputHandler(InputHandlerBase):
             f"connected_topic={self._connected_topic}, joy_topic={self._joy_topic}, "
             f"input_smoothing={'on' if self._enable_input_smoothing else 'off'}, "
             f"frame_reset={'on' if self._frame_reset_enabled else 'off'}, "
-            f"frame_reset_scope={self._frame_reset_scope}"
+            f"frame_reset_scope={self._frame_reset_scope}, "
+            f"frame_reset_rotate_position={'on' if self._frame_reset_rotate_position else 'off'}"
         )
 
     def _vector3_param(self, name: str, default: Sequence[float], *, cast):
@@ -279,11 +283,7 @@ class Quest3InputHandler(InputHandlerBase):
         self._angular_filter.reset(np.zeros(3, dtype=np.float64))
 
     def _apply_deadzone(self, value: float) -> float:
-        raw = float(value)
-        threshold = abs(self._deadzone)
-        if threshold <= 0.0 or abs(raw) <= threshold:
-            return 0.0 if threshold > 0.0 else raw
-        return raw - math.copysign(threshold, raw)
+        return float(apply_deadzone(value, self._deadzone))
 
     def _clutch_filter(self, desired: bool, now_ns: int) -> bool:
         if not self._clutch_filter_enabled:
@@ -399,10 +399,13 @@ class Quest3InputHandler(InputHandlerBase):
         if origin_pos is None or origin_quat is None:
             return raw_pos, raw_quat
 
-        origin_inv = quat_conjugate_xyzw(origin_quat)
-        rel_pos = quat_to_rotmat_xyzw(origin_inv) @ (raw_pos - origin_pos)
-        rel_quat = quat_normalize_xyzw(quat_multiply_xyzw(origin_inv, raw_quat))
-        return rel_pos, rel_quat
+        return rebase_pose_with_origin_xyzw(
+            raw_pos,
+            raw_quat,
+            origin_pos,
+            origin_quat,
+            rotate_position=self._frame_reset_rotate_position,
+        )
 
     def _compute_angular_delta(self, current_input_quat: Optional[np.ndarray]) -> np.ndarray:
         if (
@@ -412,29 +415,8 @@ class Quest3InputHandler(InputHandlerBase):
         ):
             return np.zeros(3, dtype=np.float64)
 
-        q_curr = np.asarray(current_input_quat, dtype=np.float64)
-        q_start = np.asarray(self._initial_input_quat, dtype=np.float64)
-        x1, y1, z1, w1 = q_curr
-        x2, y2, z2, w2 = np.array([-q_start[0], -q_start[1], -q_start[2], q_start[3]], dtype=np.float64)
-        q_delta = np.array(
-            [
-                w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
-                w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
-                w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
-                w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
-            ],
-            dtype=np.float64,
-        )
-        q_norm = float(np.linalg.norm(q_delta))
-        if q_norm > 1e-12:
-            q_delta = q_delta / q_norm
-        angle = 2.0 * math.acos(_clamp(float(q_delta[3]), -1.0, 1.0))
-        s = math.sqrt(max(0.0, 1.0 - float(q_delta[3]) * float(q_delta[3])))
-        if s < 1e-8 or angle < 1e-8:
-            rotvec = np.zeros(3, dtype=np.float64)
-        else:
-            axis = np.array([q_delta[0] / s, q_delta[1] / s, q_delta[2] / s], dtype=np.float64)
-            rotvec = axis * angle
+        q_delta = relative_body_quat_delta_xyzw(self._initial_input_quat, current_input_quat)
+        rotvec = quat_to_shortest_rotvec_xyzw(q_delta)
         mapped = self._select_axis(rotvec, self._orientation_mapping, self._orientation_sign, self._angular_scale)
         return self._apply_angular_smoothing(mapped)
 
@@ -461,6 +443,7 @@ class Quest3InputHandler(InputHandlerBase):
         target_quat = self._initial_robot_quat.copy()
         if self._orientation_mode == "hand_relative":
             target_rotvec = self._compute_angular_delta(controller_quat)
+            # Apply a body-frame delta so wrist motion maps to the robot TCP's local axes.
             target_quat = quat_multiply_xyzw(target_quat, rotvec_to_quat_xyzw(target_rotvec))
             target_quat = quat_normalize_xyzw(target_quat)
 

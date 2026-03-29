@@ -28,70 +28,9 @@
 
 ## 架构图
 
-下面这张图是项目当前采用的顶层分层设计图。当前代码已经部分落地，真实落地情况以 `docs/PROJECT_ANALYSIS.md` 为准。
+下面这张图是项目当前采用的顶层分层总览图。README 里使用静态 `SVG`，避免大 `Mermaid` 在网页中出现换行、缩放和主题渲染问题。更细的运行时说明见 [docs/PROJECT_ANALYSIS.md](docs/PROJECT_ANALYSIS.md)。
 
-```mermaid
-flowchart TD
-    classDef ui fill:#e3f2fd,stroke:#1e88e5,stroke-width:2px,color:#000
-    classDef core fill:#fff3e0,stroke:#fb8c00,stroke-width:2px,color:#000
-    classDef backend fill:#e8f5e9,stroke:#43a047,stroke-width:2px,color:#000
-    classDef hw fill:#f3e5f5,stroke:#8e24aa,stroke-width:2px,color:#000
-
-    subgraph TaskLayer ["GUI / Task Layer"]
-        UI["GUI 主界面<br/>(只发意图，不碰硬件)"]:::ui
-        Editor["离线数据编辑器"]:::ui
-    end
-
-    subgraph CoreLayer ["Core Layer"]
-        Orchestrator["SystemOrchestrator / StateMachine<br/>(顶层协调器)"]:::core
-        MUX{"MUX<br/>(动作仲裁)"}:::core
-        SyncHub["SyncHub<br/>(统一采样时钟)"]:::core
-        Recorder["Recorder<br/>(录制器)"]:::core
-        Infer["InferenceService<br/>(推理服务)"]:::core
-        Commander["Commander / SafetyManager<br/>(Home / HomeZone / E-Stop)"]:::core
-
-        subgraph DeviceManager ["DeviceManager / Adapters"]
-            direction LR
-            InBE["InputBackend"]:::backend
-            ArmBE["ArmBackend"]:::backend
-            GripBE["GripperBackend"]:::backend
-            CamBE["CameraBackend"]:::backend
-        end
-    end
-
-    subgraph HardwareLayer ["Hardware Layer"]
-        direction LR
-        JoyHW["Joy / MediaPipe"]:::hw
-        RobotHW["UR5 / Franka / Aubo<br/>(官方驱动 + MoveIt Servo)"]:::hw
-        GripHW["Robotiq / qbSoftHand"]:::hw
-        CamHW["RealSense / OAK-D<br/>(SDK / SHM)"]:::hw
-    end
-
-    UI --> Orchestrator
-    Orchestrator --> MUX
-    Orchestrator --> Recorder
-    Orchestrator --> Infer
-    Orchestrator --> SyncHub
-    Orchestrator --> Commander
-
-    InBE -->|"ActionCommand"| MUX
-    Infer -->|"ActionCommand"| MUX
-    Commander -->|"高优先级控制"| MUX
-
-    MUX -->|"send_delta_twist()"| ArmBE
-    MUX -->|"set_gripper()"| GripBE
-
-    SyncHub -->|"观测快照"| Recorder
-    SyncHub -->|"观测快照"| Infer
-    SyncHub -->|"get_joint_state()/get_tcp_pose()"| ArmBE
-    SyncHub -->|"get_state()"| GripBE
-    SyncHub -->|"get_frame()"| CamBE
-
-    InBE -.-> JoyHW
-    ArmBE -.-> RobotHW
-    GripBE -.-> GripHW
-    CamBE -.-> CamHW
-```
+![架构总览图](docs/assets/architecture_overview.svg)
 
 当前实现上的几个关键事实：
 
@@ -151,6 +90,8 @@ source install/setup.bash
 ```bash
 ros2 run teleop_control_py teleop_gui
 ```
+
+![GUI 界面预览](GUI.png)
 
 ## GUI 推荐工作流
 

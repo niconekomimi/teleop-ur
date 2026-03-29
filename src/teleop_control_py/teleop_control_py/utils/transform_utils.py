@@ -80,6 +80,53 @@ def quat_multiply_xyzw(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
     )
 
 
+def quat_to_shortest_rotvec_xyzw(q_xyzw: np.ndarray) -> np.ndarray:
+    """将四元数转换为最短等效路径的旋转向量。"""
+    qn = _quat_normalize_xyzw(q_xyzw)
+    if float(qn[3]) < 0.0:
+        qn = -qn
+    x, y, z, w = (float(qn[0]), float(qn[1]), float(qn[2]), float(qn[3]))
+    w = _clamp(w, -1.0, 1.0)
+    angle = 2.0 * math.acos(w)
+    s = math.sqrt(max(0.0, 1.0 - w * w))
+    if s < 1e-8 or angle < 1e-8:
+        return np.zeros(3, dtype=np.float64)
+    axis = np.array([x / s, y / s, z / s], dtype=np.float64)
+    return axis * angle
+
+
+def relative_body_quat_delta_xyzw(start_quat_xyzw: np.ndarray, current_quat_xyzw: np.ndarray) -> np.ndarray:
+    """计算以起始姿态局部坐标系表示的相对旋转增量。"""
+    q_start = _quat_normalize_xyzw(start_quat_xyzw)
+    q_curr = _quat_normalize_xyzw(current_quat_xyzw)
+    q_delta = quat_multiply_xyzw(quat_conjugate_xyzw(q_start), q_curr)
+    if float(q_delta[3]) < 0.0:
+        q_delta = -q_delta
+    return _quat_normalize_xyzw(q_delta)
+
+
+def rebase_pose_with_origin_xyzw(
+    raw_pos_xyz: np.ndarray,
+    raw_quat_xyzw: np.ndarray,
+    origin_pos_xyz: np.ndarray,
+    origin_quat_xyzw: np.ndarray,
+    *,
+    rotate_position: bool = False,
+) -> tuple[np.ndarray, np.ndarray]:
+    """将原始控制器位姿重映射到以 ``origin`` 为参考的新坐标系。"""
+    raw_pos = np.asarray(raw_pos_xyz, dtype=np.float64).reshape(3)
+    raw_quat = _quat_normalize_xyzw(raw_quat_xyzw)
+    origin_pos = np.asarray(origin_pos_xyz, dtype=np.float64).reshape(3)
+    origin_quat = _quat_normalize_xyzw(origin_quat_xyzw)
+
+    origin_inv = quat_conjugate_xyzw(origin_quat)
+    rel_pos = raw_pos - origin_pos
+    if rotate_position:
+        rel_pos = quat_to_rotmat_xyzw(origin_inv) @ rel_pos
+    rel_quat = _quat_normalize_xyzw(quat_multiply_xyzw(origin_inv, raw_quat))
+    return rel_pos.astype(np.float64), rel_quat.astype(np.float64)
+
+
 def euler_to_quat_xyzw(roll: float, pitch: float, yaw: float) -> np.ndarray:
     """欧拉角转 XYZW 四元数。"""
     cr = math.cos(roll * 0.5)

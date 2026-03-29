@@ -309,9 +309,9 @@ GuiAppService.start_teleop()
 
 当前默认语义：
 
-- `active_hand = right`
-- 右手 `squeeze / grip` 作为 clutch
-- 右手 `trigger` 作为夹爪
+- `active_hand = left`
+- 左手 `squeeze / grip` 作为 clutch
+- 左手 `trigger` 作为夹爪
 - 输入层默认关闭低通平滑
 - `frame reset` 默认只作用于 `active_hand`
 
