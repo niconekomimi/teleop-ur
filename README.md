@@ -1,4 +1,4 @@
-# teleop_control_py Workspace
+# teleop_control
 
 中文 | [English](README_EN.md)
 
