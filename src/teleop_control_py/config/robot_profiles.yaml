@@ -77,7 +77,7 @@ profiles:
         open_ratio: 0.9
         max_open_position_m: 0.142
         target_speed: 1.0
-        target_force: 0.5
+        target_force: 0.3
       qbsofthand:
         state_topic: /gripper/cmd
         service_name: /qbsofthand_control_node/set_closure

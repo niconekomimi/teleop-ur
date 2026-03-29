@@ -3,11 +3,13 @@ build/
 install/
 log/
 .vscode/
-data/
+.local_tools/
+data/*
+!data/.gitkeep
 test/
 udev/
-models/
+models/*
+!models/.gitkeep
 __pycache__/
 *.py[cod]
 test.md
-

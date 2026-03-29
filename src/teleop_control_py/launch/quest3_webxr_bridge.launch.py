@@ -30,12 +30,12 @@ def _launch_bridge(context, *args, **kwargs):
 
 def generate_launch_description() -> LaunchDescription:
     teleop_share = get_package_share_directory("teleop_control_py")
-    default_params = os.path.join(teleop_share, "config", "quest3_webxr_bridge_params.yaml")
+    default_params = os.path.join(teleop_share, "config", "teleop_params.yaml")
 
     params_file_arg = DeclareLaunchArgument(
         "params_file",
         default_value=default_params,
-        description="Path to quest3 WebXR bridge parameter file",
+        description="Path to params file containing the quest3_webxr_bridge_node section",
     )
     advertised_host_arg = DeclareLaunchArgument(
         "advertised_host",

@@ -1,6 +1,8 @@
+中文 | [English](current_control_behavior_spec_v0.1_EN.md)
+
 # 当前控制行为规格 v0.1
 
-更新时间：2026-03-22
+更新时间：2026-03-29
 
 这份文档只描述当前代码真实行为，不描述未来目标架构。
 
@@ -31,7 +33,7 @@
 
 职责：
 
-- 读取 `joy` 或 `mediapipe` 输入
+- 读取 `joy`、`mediapipe` 或 `quest3` 输入
 - 把输入标准化为 `ActionCommand`
 - 做速度和加速度限幅
 - 通过 `ControlCoordinator` 下发遥操作动作
@@ -39,7 +41,9 @@
 
 输入：
 
-- `/joy` 或 SDK / topic 图像输入
+- `joy`：`/joy`
+- `mediapipe`：SDK 相机或图像 topic
+- `quest3`：`/quest3/right_controller/pose`、`/quest3/left_controller/pose`、`/quest3/input/joy`
 
 输出：
 
@@ -265,6 +269,7 @@ GuiAppService.start_teleop()
 - 启动 `robot_commander_node`
 - 启动 `teleop_control_node`
 - 若 `input_type == joy`，引入 `joy_driver.launch.py`
+- 若 `input_type == quest3` 且 `launch_quest3_bridge` 解析为启用，则自动引入 `quest3_webxr_bridge_node`
 
 参数来源：
 
@@ -292,6 +297,23 @@ GuiAppService.start_teleop()
 
 - SDK 深度默认关闭
 - 只有启动 hand / mediapipe 且显式要求深度时才开启
+
+### `input_type = quest3`
+
+流程：
+
+1. `quest3_webxr_bridge_node` 发布 `/quest3/*` 控制器话题
+2. `Quest3InputHandler` 读取控制器 pose 与 `/quest3/input/joy`
+3. 默认使用 `relative pose + clutch + hand_relative orientation`
+4. 默认支持 Quest2ROS 风格的相对 frame 重置
+
+当前默认语义：
+
+- `active_hand = right`
+- 右手 `squeeze / grip` 作为 clutch
+- 右手 `trigger` 作为夹爪
+- 输入层默认关闭低通平滑
+- `frame reset` 默认只作用于 `active_hand`
 
 ## 4.3 遥操作持续循环
 

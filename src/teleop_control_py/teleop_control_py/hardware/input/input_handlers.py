@@ -141,6 +141,10 @@ class InputHandlerBase(ABC):
             gripper = 0.0 if timed_out else float(self._latest_gripper)
             return twist, gripper
 
+    def _current_gripper(self) -> float:
+        with self._lock:
+            return float(self._latest_gripper)
+
     @abstractmethod
     def get_command(self) -> tuple[Twist, float]:
         """返回标准化控制命令：(twist, gripper_value)。"""

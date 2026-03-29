@@ -92,7 +92,9 @@ def _coerce_input_type(value: str) -> str:
         return "joy"
     if normalized == "hand":
         return "mediapipe"
-    if normalized in ("joy", "mediapipe"):
+    if normalized in ("quest3", "quest", "vr", "webxr"):
+        return "quest3"
+    if normalized in ("joy", "mediapipe", "quest3"):
         return normalized
     return ""
 
@@ -334,7 +336,7 @@ def generate_launch_description():
     input_type_arg = DeclareLaunchArgument(
         "input_type",
         default_value="",
-        description="Optional input backend override (joy|mediapipe). Empty means read from params_file.",
+        description="Optional input backend override (joy|mediapipe|quest3). Empty means read from params_file.",
     )
 
     gripper_type_arg = DeclareLaunchArgument(

@@ -5,6 +5,8 @@
 ### 一键启动（默认：手柄控制）
 ```bash
 ros2 launch teleop_control_py control_system.launch.py
+
+ros2 launch teleop_control_py control_system.launch.py input_type:=quest3
 ```
 
 ### 手势控制(调试)
@@ -65,4 +67,24 @@ python3 scripts/visualize_hdf5_demo.py data/libero_demos.hdf5 --no-file-lock
 
 #指定demo
 python3 scripts/visualize_hdf5_demo.py data/libero_demos.hdf5 --demo demo_1 --keys eye_in_hand_rgb agentview_rgb --fps 30 --no-file-lock
+```
+
+
+# quest遥操作
+启动遥操作节点
+```bash
+# advertised_host设置为自己与quest3同一个网段下的ip地址
+ros2 run teleop_control_py quest3_webxr_bridge_node \
+  --ros-args \
+  -p advertised_host:=192.168.137.227 \
+  -p auto_generate_self_signed_cert:=true
+```
+
+```bash
+ros2 launch teleop_control_py control_system.launch.py \
+  input_type:=quest3 \
+  launch_teleop_node:=false \
+  launch_quest3_bridge:=false
+ros2 launch teleop_control_py quest3_webxr_bridge.launch.py
+ros2 launch teleop_control_py teleop_control.launch.py input_type:=quest3
 ```

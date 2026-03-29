@@ -11,7 +11,7 @@ teleop_control_node:
     # ==========================================================
     # 1) 后端选择
     # ==========================================================
-    # joy | mediapipe
+    # joy | mediapipe | quest3
     input_type: "joy"
 
     # robotiq | qbsofthand
@@ -35,8 +35,8 @@ teleop_control_node:
     # 参考 ROS 官方 teleop_twist_joy 常见 xbox / ps3-holonomic 示例：
     # 常速 linear 常落在 0.4~0.7，angular 常落在 0.4~0.5，并配 enable/turbo。
     # 当前系统还没有 turbo 档，这里先迁一版“保守常速 + 更细中段”的手感来试。
-    max_linear_vel: 0.8
-    max_angular_vel: 1.5
+    max_linear_vel: 2.0
+    max_angular_vel: 3.0
     max_linear_accel: 6.0
     max_angular_accel: 12.0
     # 松手后回零时使用的加速度倍率。
@@ -88,7 +88,65 @@ teleop_control_node:
     gripper_axis_inverted: false
 
     # ==========================================================
-    # 4) MediaPipe 输入
+    # 4) Quest 3 WebXR 输入
+    # ==========================================================
+    quest3_connected_topic: "/quest3/connected"
+    quest3_left_pose_topic: "/quest3/left_controller/pose"
+    quest3_right_pose_topic: "/quest3/right_controller/pose"
+    quest3_joy_topic: "/quest3/input/joy"
+    quest3_require_connected: true
+    quest3_pose_timeout_sec: 0.3
+    quest3_active_hand: "right"
+    # Quest 控制器遥操作优先使用相对位姿 + clutch 的 target_pose 模式。
+    # 这是比视觉手势更稳定的主流做法：按住 clutch 时记录手柄/机器人起点，
+    # 再用手柄相对位姿持续驱动 TCP 目标位姿。
+    quest3_motion_mode: "target_pose"
+    quest3_deadzone: 0.005
+    quest3_linear_scale: 1.0
+    quest3_angular_scale: 1.0
+    quest3_position_linear_gain: 10.0
+    quest3_position_angular_gain: 8.0
+    quest3_max_linear_vel: 2.8
+    quest3_max_angular_vel: 5.0
+    quest3_max_linear_accel: 14.0
+    quest3_max_angular_accel: 24.0
+    quest3_linear_axis_mapping: [0, 2, 1]
+    quest3_angular_axis_mapping: [1, 0, 2]
+    quest3_linear_axis_sign: [-1.0, 1.0, 1.0]
+    quest3_angular_axis_sign: [-1.0, -1.0, 1.0]
+    quest3_orientation_mode: "hand_relative"
+    quest3_orientation_axis_mapping: [1, 0, 2]
+    quest3_orientation_axis_sign: [-1.0, -1.0, 1.0]
+    # Quest 控制器本身 6DoF 跟踪已经很稳，默认不要再在输入层做低通，
+    # 避免明显拖手。若后面只想抑制轻微抖动，再打开这个开关。
+    quest3_enable_input_smoothing: false
+    quest3_smoothing_alpha: 0.45
+    # Quest2ROS 风格的相对 frame 重置。
+    # 长按组合键后，把当前控制器姿态定义为新的相对参考系，
+    # 后续 clutch / pose delta 都基于这个参考系解释。
+    quest3_frame_reset_enabled: true
+    # active_hand: 只允许当前控制手做 frame reset；both: 左右手都可单独重置。
+    quest3_frame_reset_scope: "active_hand"
+    quest3_frame_reset_hold_sec: 0.75
+    quest3_left_frame_reset_buttons: [4, 5]   # X + Y
+    quest3_right_frame_reset_buttons: [10, 11]  # A + B
+    quest3_clutch_filter_enabled: true
+    quest3_clutch_engage_confirm_sec: 0.02
+    quest3_clutch_release_confirm_sec: 0.02
+    quest3_clutch_axis_threshold: 0.15
+    quest3_left_clutch_axis: 1
+    quest3_right_clutch_axis: 7
+    quest3_left_clutch_button: 1
+    quest3_right_clutch_button: 7
+    quest3_left_trigger_axis: 0
+    quest3_right_trigger_axis: 6
+    quest3_left_trigger_button: 0
+    quest3_right_trigger_button: 6
+    quest3_gripper_requires_clutch: true
+    quest3_gripper_axis_inverted: false
+
+    # ==========================================================
+    # 5) MediaPipe 输入
     # ==========================================================
     # 直接订阅手势识别输入图像，在 teleop 节点内完成 MediaPipe 手部跟踪。
     mediapipe_input_topic: "/camera/camera/color/image_raw"
@@ -136,8 +194,70 @@ teleop_control_node:
     mediapipe_show_debug_window: true
 
     # ==========================================================
-    # 5) 夹爪输出
+    # 6) 夹爪输出
     # ==========================================================
     # gripper_type 负责上层选择具体末端执行器。
     # 详细接口默认值（command topic / action / service / quantization）
     # 统一来自 robot_profile.grippers。
+
+# MoveIt Servo 覆盖项。
+# 这些值会在 control_system.launch.py 里作为 moveit_servo.* 参数注入，
+# 用来覆盖 upstream ur_moveit_config 的默认 Servo 手感，而不修改外部库源码。
+moveit_servo:
+  ros__parameters:
+    system_latency_compensation: 0.0
+    low_latency_mode: false
+
+# Robotiq 硬件启动参数。
+# 这些值会由 control_system.launch.py 解析后传给 robotiq_2f_gripper_launch.py，
+# open/close_threshold 会被临时写成运行时 YAML，再传给上游节点。
+robotiq_gripper:
+  ros__parameters:
+    serial_port: "/dev/robotiq_gripper"
+    baudrate: 115200
+    timeout: 1.0
+    action_timeout: 20
+    slave_address: 9
+    fake_hardware: false
+    rviz2: false
+    open_threshold: 0.3
+    close_threshold: -0.3
+
+# Quest 3 WebXR bridge 启动参数。
+# control_system.launch.py 在 input_type:=quest3 且 launch_quest3_bridge:=auto 时会自动启动它。
+quest3_webxr_bridge_node:
+  ros__parameters:
+    # WebXR / Vuer websocket server
+    vuer_host: "0.0.0.0"
+    vuer_port: 8012
+    vuer_client_domain: "https://vuer.ai"
+
+    # Quest 应访问本机的哪个局域网 IP。
+    # 双网卡场景建议明确写成电脑 Wi-Fi 的 IPv4，避免误选到 UR5 有线网卡。
+    advertised_host: "192.168.137.227"
+
+    # 默认使用本地自签名证书，通过 https/wss 提供 WebXR。
+    auto_generate_self_signed_cert: true
+    tls_workdir: "/tmp/teleop_control_py/quest3_webxr_tls"
+
+    # 如果未来通过公网 TLS 代理暴露 websocket，可在这里放完整 wss 地址。
+    public_wss_url: ""
+
+    ssl_cert_file: ""
+    ssl_key_file: ""
+
+    stream_key: "quest3-controllers"
+    stream_left: true
+    stream_right: true
+
+    publish_rate_hz: 90.0
+    stale_timeout_sec: 0.5
+    frame_id: "quest3_world"
+
+    left_pose_topic: "/quest3/left_controller/pose"
+    right_pose_topic: "/quest3/right_controller/pose"
+    left_matrix_topic: "/quest3/left_controller/matrix"
+    right_matrix_topic: "/quest3/right_controller/matrix"
+    joy_topic: "/quest3/input/joy"
+    connected_topic: "/quest3/connected"
+    debug_log_all_vuer_events: false

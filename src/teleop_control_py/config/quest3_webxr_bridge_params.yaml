@@ -7,11 +7,11 @@ quest3_webxr_bridge_node:
 
     # The LAN host/IP that Quest should use to reach this PC.
     # Leave empty to auto-detect.
-    advertised_host: "10.16.6.247"
+    advertised_host: ""
 
     # Default mode: auto-generate a local self-signed certificate and serve
     # Quest directly over https/wss on the same port.
-    auto_generate_self_signed_cert: false
+    auto_generate_self_signed_cert: true
     tls_workdir: "/tmp/teleop_control_py/quest3_webxr_tls"
 
     # If you instead expose the bridge through ngrok / localtunnel / your own
@@ -39,4 +39,4 @@ quest3_webxr_bridge_node:
     right_matrix_topic: "/quest3/right_controller/matrix"
     joy_topic: "/quest3/input/joy"
     connected_topic: "/quest3/connected"
-    debug_log_all_vuer_events: true
+    debug_log_all_vuer_events: false

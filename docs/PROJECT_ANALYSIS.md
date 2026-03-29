@@ -1,6 +1,8 @@
+中文 | [English](PROJECT_ANALYSIS_EN.md)
+
 # PROJECT_ANALYSIS
 
-更新时间：2026-03-22
+更新时间：2026-03-29
 
 ## 1. 文档目的
 
@@ -132,7 +134,7 @@
 职责：
 
 - `teleop_control_node`
-  - 读取 `joy` 或 `mediapipe` 输入。
+  - 读取 `joy`、`mediapipe` 或 `quest3` 输入。
   - 做速度/加速度限幅。
   - 通过 `ControlCoordinator` 下发遥操作动作。
 - `robot_commander_node`
@@ -146,6 +148,8 @@
   - 用 `SyncHub + RecorderService` 录制 HDF5。
 - `joy_driver_node`
   - 独立负责手柄设备接入，发布 `/joy`。
+- `quest3_webxr_bridge_node`
+  - 独立负责 Quest Browser WebXR 控制器流接入，发布 `/quest3/*`。
 - `device_manager`
   - 提供 `ServoArmBackend / ControllerGripperBackend / SharedMemoryCameraBackend / InputHandlerBackend`
   - 提供 `robot_profile` 加载与默认值装配。
@@ -180,6 +184,7 @@
 - 按需创建 `teleop_control_node`
 - 按需创建 `data_collector_node`
 - 当 `input_type == joy` 时引入 `joy_driver.launch.py`
+- 当 `input_type == quest3` 且 bridge 开关启用时自动引入 `quest3_webxr_bridge_node`
 
 ---
 
@@ -223,7 +228,10 @@ Joy / MediaPipe
 - `input_type` 当前支持：
   - `joy`
   - `mediapipe`
+  - `quest3`
 - `mediapipe` 默认走 SDK 相机直连，深度流默认关闭，只有显式开启时才启用。
+- `quest3` 已实现正式 `Quest3InputHandler`，默认使用 `relative pose + clutch + hand_relative orientation`。
+- `quest3` 当前支持 Quest2ROS 风格的相对 frame 重置，默认仅作用于 `active_hand`。
 - 遥操作循环中始终执行速度/加速度限幅。
 - `home_zone_active == true` 时，遥操作输出被暂停。
 - **当前实现中，新的人工输入不会取消 Home Zone。**

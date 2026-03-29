@@ -8,6 +8,7 @@
 
 - [docs/PROJECT_ANALYSIS.md](docs/PROJECT_ANALYSIS.md)
 - [docs/current_control_behavior_spec_v0.1.md](docs/current_control_behavior_spec_v0.1.md)
+- [docs/QUEST3_WEBXR_VUER.md](docs/QUEST3_WEBXR_VUER.md)
 
 ## 项目定位
 
@@ -20,7 +21,7 @@
 当前默认组合：
 
 - 机械臂：UR5 + MoveIt Servo
-- 输入：`joy` 或 `mediapipe`
+- 输入：`joy` / `mediapipe` / `quest3`
 - 夹爪：`robotiq` 或 `qbsofthand`
 - 采集格式：HDF5
 - 主入口：GUI
@@ -151,23 +152,18 @@ source install/setup.bash
 ros2 run teleop_control_py teleop_gui
 ```
 
-源码态调试入口：
-
-```bash
-python3 scripts/teleop_gui.py
-```
-
 ## GUI 推荐工作流
 
 推荐顺序：
 
 1. 在 GUI 里选择 `ur_type`、机器人 IP、输入后端、夹爪类型
-2. 启动机械臂驱动
-3. 启动遥操作系统
-4. 启动采集节点
-5. 开始录制 / 停止录制 / 弃用最近 Demo
-6. 根据需要执行 `Go Home` / `Go Home Zone` / `设当前姿态为 Home`
-7. 需要模型执行时，启动推理并再单独使能推理执行
+2. 如果选择 `quest3`，先确认 Quest bridge 已运行，并在 Quest 头显中打开对应网页后点击进入 `VR` 模式
+3. 启动机械臂驱动
+4. 启动遥操作系统
+5. 启动采集节点
+6. 开始录制 / 停止录制 / 弃用最近 Demo
+7. 根据需要执行 `Go Home` / `Go Home Zone` / `设当前姿态为 Home`
+8. 需要模型执行时，启动推理并再单独使能推理执行
 
 当前 GUI 负责：
 
@@ -214,6 +210,19 @@ ros2 launch teleop_control_py control_system.launch.py \
     gripper_type:=robotiq
 ```
 
+Quest3 + Robotiq：
+
+```bash
+ros2 launch teleop_control_py control_system.launch.py \
+    input_type:=quest3 \
+    gripper_type:=robotiq
+```
+
+说明：
+
+- `input_type:=quest3` 时，`control_system.launch.py` 默认会自动启动 `quest3_webxr_bridge_node`
+- Quest 侧推荐入口见 [docs/QUEST3_WEBXR_VUER.md](docs/QUEST3_WEBXR_VUER.md)
+
 整套系统 + 采集节点：
 
 ```bash
@@ -223,11 +232,10 @@ ros2 launch teleop_control_py control_system.launch.py \
     enable_data_collector:=true
 ```
 
-## 仅启动遥操作相关链路
+更多分离启动、参数调试和 Quest3 专项说明见：
 
-```bash
-ros2 launch teleop_control_py teleop_control.launch.py
-```
+- [docs/QUEST3_WEBXR_VUER.md](docs/QUEST3_WEBXR_VUER.md)
+- [docs/current_control_behavior_spec_v0.1.md](docs/current_control_behavior_spec_v0.1.md)
 
 ## 单独启动采集节点
 
@@ -254,6 +262,9 @@ ros2 service call /commander/go_home_zone std_srvs/srv/Trigger {}
 - `teleop` 与 `inference execution` 当前互斥
 - `Home / Home Zone` 高于遥操作
 - 如果 GUI 当前正在执行推理，发起 `Home / Home Zone` 时会先停止推理执行
+- `quest3` 当前已经接入为正式输入后端，不再只是 bridge 原型
+- `quest3` 默认采用 `relative pose + clutch + hand_relative orientation`，输入层默认关闭低通滤波
+- `quest3` 支持 Quest2ROS 风格的相对 frame 重置，默认只作用于 `active_hand`
 - `Home` 通过 trajectory controller 执行
 - `Home Zone` 先回 Home，再切回 Servo 控制做位姿扰动
 - `Home Zone` 不会被新的人工输入自动取消
@@ -264,7 +275,7 @@ ros2 service call /commander/go_home_zone std_srvs/srv/Trigger {}
 | 文件 | 作用 |
 | --- | --- |
 | `src/teleop_control_py/config/robot_profiles.yaml` | 底层机械臂 / 夹爪 / ROS 接口默认值真源 |
-| `src/teleop_control_py/config/teleop_params.yaml` | 遥操作行为配置 |
+| `src/teleop_control_py/config/teleop_params.yaml` | 遥操作行为配置；同时包含 Quest3 bridge 默认参数 |
 | `src/teleop_control_py/config/data_collector_params.yaml` | 采集行为配置 |
 | `src/teleop_control_py/config/gui_params.yaml` | GUI 默认值和上次选择 |
 | `src/teleop_control_py/config/home_overrides.yaml` | 运行期 Home 点覆盖 |

@@ -177,6 +177,7 @@ class TeleopMainWindow(QMainWindow):
         self.mode_combo = QComboBox()
         self.mode_combo.addItem("joy (手柄)", "joy")
         self.mode_combo.addItem("mediapipe (手势输入)", "mediapipe")
+        self.mode_combo.addItem("quest3 (VR 控制器)", "quest3")
         default_input_index = max(0, self.mode_combo.findData(self.gui_settings.default_input_type))
         self.mode_combo.setCurrentIndex(default_input_index)
         settings_layout.addWidget(self.mode_combo, 0, 1)
@@ -843,6 +844,7 @@ class TeleopMainWindow(QMainWindow):
         self.mode_combo = QComboBox()
         self.mode_combo.addItem("joy (手柄)", "joy")
         self.mode_combo.addItem("mediapipe (手势输入)", "mediapipe")
+        self.mode_combo.addItem("quest3 (VR 控制器)", "quest3")
         default_input_index = max(0, self.mode_combo.findData(self.gui_settings.default_input_type))
         self.mode_combo.setCurrentIndex(default_input_index)
         toolbar.addWidget(self.mode_combo)
@@ -2844,10 +2846,12 @@ class TeleopMainWindow(QMainWindow):
         label.setStyleSheet(f"font-weight: bold; color: {color};")
 
     def _update_input_mode_widgets(self) -> None:
-        is_joy = self._selected_input_type() == "joy"
+        input_type = self._selected_input_type()
+        is_joy = input_type == "joy"
+        is_mediapipe = input_type == "mediapipe"
         self.joy_profile_combo.setEnabled(is_joy)
-        self.mediapipe_topic_combo.setEnabled(not is_joy)
-        self.mediapipe_camera_combo.setEnabled(not is_joy)
+        self.mediapipe_topic_combo.setEnabled(is_mediapipe)
+        self.mediapipe_camera_combo.setEnabled(is_mediapipe)
 
     def _refresh_runtime_status(self) -> None:
         popup_preview_running = bool(self.preview_window is not None and self.preview_window.isVisible())
@@ -3033,6 +3037,13 @@ class TeleopMainWindow(QMainWindow):
             camera_name = str(profile.get("name", "d435")).upper()
             self.input_hint_label.setText(
                 f"手势识别输入当前使用相机 `{camera_name}`。"
+            )
+            self.input_hint_label.setStyleSheet("color: #555; font-size: 12px;")
+            return
+
+        if input_type == "quest3":
+            self.input_hint_label.setText(
+                "Quest3 模式使用 WebXR 控制器输入。请先保持 Quest bridge 运行，并在头显中打开对应的 Quest 页面。"
             )
             self.input_hint_label.setStyleSheet("color: #555; font-size: 12px;")
             return
@@ -3257,6 +3268,15 @@ class TeleopMainWindow(QMainWindow):
                         "当前已选择 mediapipe 输入。\n\n"
                         f"相机: `{camera_name}`\n"
                         "MediaPipe 将直接作为识别算法输入。"
+                    ),
+                )
+            elif input_type == "quest3":
+                QMessageBox.information(
+                    self,
+                    "Quest3 提示",
+                    (
+                        "当前已选择 Quest3 输入。\n\n"
+                        "请确认 Quest bridge 正在运行，并且头显已进入 Quest WebXR 控制页面。"
                     ),
                 )
 

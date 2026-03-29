@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import tempfile
 from typing import Any, Dict, Optional
 
 from ament_index_python.packages import get_package_share_directory
@@ -19,6 +20,7 @@ from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.actions import SetParameter
 from launch_ros.actions import SetRemap
 from launch_ros.parameter_descriptions import ParameterValue
 
@@ -71,7 +73,7 @@ def _default_python_executable() -> str:
 	return "python3"
 
 
-def _load_teleop_params(params_file: str) -> Dict[str, Any]:
+def _load_yaml_dict(params_file: str) -> Dict[str, Any]:
 	try:
 		import yaml  # type: ignore
 	except Exception:
@@ -85,6 +87,13 @@ def _load_teleop_params(params_file: str) -> Dict[str, Any]:
 
 	if not isinstance(data, dict):
 		return {}
+	return data
+
+
+def _load_teleop_params(params_file: str) -> Dict[str, Any]:
+	data = _load_yaml_dict(params_file)
+	if not data:
+		return {}
 
 	for key in ("teleop_control_node", "/teleop_control_node"):
 		block = data.get(key)
@@ -97,13 +106,58 @@ def _load_teleop_params(params_file: str) -> Dict[str, Any]:
 	return {}
 
 
+def _load_named_params(params_file: str, section_name: str) -> Dict[str, Any]:
+	data = _load_yaml_dict(params_file)
+	if not data:
+		return {}
+
+	block = data.get(section_name)
+	if not isinstance(block, dict):
+		return {}
+
+	params = block.get("ros__parameters")
+	if isinstance(params, dict):
+		return params
+	return block
+
+
+def _resolve_launch_or_config(context, arg_name: str, config: Dict[str, Any], key: str, default: str = "") -> str:
+	raw = LaunchConfiguration(arg_name).perform(context).strip()
+	if raw != "":
+		return raw
+	if key in config and config[key] is not None:
+		return str(config[key])
+	return default
+
+
+def _materialize_robotiq_config(config: Dict[str, Any]) -> str:
+	try:
+		import yaml  # type: ignore
+	except Exception:
+		return ""
+
+	config_path = os.path.join(tempfile.gettempdir(), "teleop_control_py_robotiq_config.yaml")
+	payload = {
+		"open_threshold": float(config.get("open_threshold", 0.3)),
+		"close_threshold": float(config.get("close_threshold", -0.3)),
+	}
+	try:
+		with open(config_path, "w", encoding="utf-8") as f:
+			yaml.safe_dump(payload, f, sort_keys=False)
+	except Exception:
+		return ""
+	return config_path
+
+
 def _coerce_input_type(value: str) -> str:
 	normalized = value.strip().lower()
 	if normalized == "xbox":
 		return "joy"
 	if normalized == "hand":
 		return "mediapipe"
-	if normalized in ("joy", "mediapipe"):
+	if normalized in ("quest3", "quest", "vr", "webxr"):
+		return "quest3"
+	if normalized in ("joy", "mediapipe", "quest3"):
 		return normalized
 	return ""
 
@@ -166,11 +220,64 @@ def _teleop_node_enabled(context) -> bool:
 	return value in ("1", "true", "yes", "on")
 
 
+def _quest3_bridge_enabled(context, resolved_input_type: Optional[str] = None) -> bool:
+	value = LaunchConfiguration("launch_quest3_bridge").perform(context).strip().lower()
+	if value in ("1", "true", "yes", "on"):
+		return True
+	if value in ("0", "false", "no", "off"):
+		return False
+	if resolved_input_type is None:
+		resolved_input_type = _resolve_input_type(context)
+	return resolved_input_type == "quest3"
+
+
+def _maybe_include_quest3_bridge(context, *args, **kwargs):
+	input_type = _resolve_input_type(context)
+	enabled_raw = LaunchConfiguration("launch_quest3_bridge").perform(context).strip() or "auto"
+	enabled = _quest3_bridge_enabled(context, input_type)
+	params_file = LaunchConfiguration("quest3_bridge_params_file").perform(context).strip()
+	resolved_params_file = params_file or LaunchConfiguration("params_file").perform(context)
+	advertised_host = LaunchConfiguration("quest3_advertised_host").perform(context).strip()
+
+	actions = [
+		LogInfo(
+			msg=(
+				f"[control_system] launch_quest3_bridge={enabled_raw}, "
+				f"resolved input_type={input_type}, bridge_params_file={resolved_params_file}"
+			)
+		)
+	]
+	if not enabled:
+		actions.append(LogInfo(msg="[control_system] Skip Quest3 bridge"))
+		return actions
+
+	parameters = [resolved_params_file]
+	if advertised_host:
+		parameters.append({"advertised_host": advertised_host})
+
+	actions.append(
+		Node(
+			package="teleop_control_py",
+			executable="quest3_webxr_bridge_node",
+			name="quest3_webxr_bridge_node",
+			output="screen",
+			parameters=parameters,
+		)
+	)
+	return actions
+
+
 def _maybe_include_end_effector_driver(context, *args, **kwargs):
 	ee = _resolve_gripper_type(context)
 	actions = [LogInfo(msg=f"[control_system] resolved gripper_type: {ee}")]
 
 	if ee == "robotiq":
+		params_file = LaunchConfiguration("params_file").perform(context)
+		robotiq_cfg = _load_named_params(params_file, "robotiq_gripper")
+		robotiq_config_file = _resolve_launch_or_config(context, "robotiq_config_file", {}, "config_file", "")
+		if robotiq_config_file == "" and robotiq_cfg:
+			robotiq_config_file = _materialize_robotiq_config(robotiq_cfg)
+
 		robotiq_share = get_package_share_directory("robotiq_2f_gripper_hardware")
 		robotiq_launch_path = os.path.join(robotiq_share, "launch", "robotiq_2f_gripper_launch.py")
 		actions.append(
@@ -178,11 +285,14 @@ def _maybe_include_end_effector_driver(context, *args, **kwargs):
 				PythonLaunchDescriptionSource(robotiq_launch_path),
 				launch_arguments={
 					"namespace": LaunchConfiguration("robotiq_namespace"),
-					"serial_port": LaunchConfiguration("robotiq_serial_port"),
-					"fake_hardware": LaunchConfiguration("robotiq_fake_hardware"),
-					"config_file": LaunchConfiguration("robotiq_config_file"),
-					"rviz2": LaunchConfiguration("robotiq_rviz2"),
-					"log_level": LaunchConfiguration("robotiq_log_level"),
+					"serial_port": _resolve_launch_or_config(context, "robotiq_serial_port", robotiq_cfg, "serial_port", "/dev/robotiq_gripper"),
+					"baudrate": _resolve_launch_or_config(context, "robotiq_baudrate", robotiq_cfg, "baudrate", "115200"),
+					"timeout": _resolve_launch_or_config(context, "robotiq_timeout", robotiq_cfg, "timeout", "1.0"),
+					"action_timeout": _resolve_launch_or_config(context, "robotiq_action_timeout", robotiq_cfg, "action_timeout", "20"),
+					"slave_address": _resolve_launch_or_config(context, "robotiq_slave_address", robotiq_cfg, "slave_address", "9"),
+					"fake_hardware": _resolve_launch_or_config(context, "robotiq_fake_hardware", robotiq_cfg, "fake_hardware", "False"),
+					"config_file": robotiq_config_file,
+					"rviz2": _resolve_launch_or_config(context, "robotiq_rviz2", robotiq_cfg, "rviz2", "False"),
 				}.items(),
 			)
 		)
@@ -244,6 +354,8 @@ def _maybe_include_moveit_servo(context, *args, **kwargs):
 	if not enable_moveit:
 		return actions
 
+	params_file = LaunchConfiguration("params_file").perform(context)
+	servo_override_params = _load_named_params(params_file, "moveit_servo")
 	moveit_share = get_package_share_directory("ur_moveit_config")
 	moveit_launch_path = os.path.join(moveit_share, "launch", "ur_moveit.launch.py")
 	actions.append(
@@ -252,6 +364,10 @@ def _maybe_include_moveit_servo(context, *args, **kwargs):
 				# Do NOT modify upstream UR packages. Instead, remap Servo's private input topic
 				# so our teleop publisher `/servo_node/delta_twist_cmds` is always consumed.
 				SetRemap(src="~/delta_twist_cmds", dst="/servo_node/delta_twist_cmds"),
+				*[
+					SetParameter(name=f"moveit_servo.{key}", value=ParameterValue(value))
+					for key, value in servo_override_params.items()
+				],
 				IncludeLaunchDescription(
 					PythonLaunchDescriptionSource(moveit_launch_path),
 					launch_arguments={
@@ -264,6 +380,15 @@ def _maybe_include_moveit_servo(context, *args, **kwargs):
 			]
 		)
 	)
+	if servo_override_params:
+		actions.append(
+			LogInfo(
+				msg=(
+					f"[control_system] Applied MoveIt Servo overrides from params_file: "
+					f"{', '.join(sorted(servo_override_params.keys()))}"
+				)
+			)
+		)
 	actions.append(LogInfo(msg="[control_system] Included ur_moveit_config/ur_moveit.launch.py"))
 	return actions
 
@@ -335,7 +460,7 @@ def generate_launch_description() -> LaunchDescription:
 	input_type_arg = DeclareLaunchArgument(
 		"input_type",
 		default_value="",
-		description="Optional input backend override (joy|mediapipe). Empty means read from params_file.",
+		description="Optional input backend override (joy|mediapipe|quest3). Empty means read from params_file.",
 	)
 	gripper_type_arg = DeclareLaunchArgument(
 		"gripper_type",
@@ -400,28 +525,43 @@ def generate_launch_description() -> LaunchDescription:
 	)
 	robotiq_serial_port_arg = DeclareLaunchArgument(
 		"robotiq_serial_port",
-		default_value="/dev/robotiq_gripper",
-		description="Serial port for Robotiq gripper (recommended to use a udev symlink, e.g. /dev/robotiq_gripper)",
+		default_value="",
+		description="Optional serial port override for Robotiq gripper. Empty means read from params_file.",
+	)
+	robotiq_baudrate_arg = DeclareLaunchArgument(
+		"robotiq_baudrate",
+		default_value="",
+		description="Optional baudrate override for Robotiq gripper. Empty means read from params_file.",
+	)
+	robotiq_timeout_arg = DeclareLaunchArgument(
+		"robotiq_timeout",
+		default_value="",
+		description="Optional serial timeout override for Robotiq gripper. Empty means read from params_file.",
+	)
+	robotiq_action_timeout_arg = DeclareLaunchArgument(
+		"robotiq_action_timeout",
+		default_value="",
+		description="Optional action timeout override for Robotiq gripper. Empty means read from params_file.",
+	)
+	robotiq_slave_address_arg = DeclareLaunchArgument(
+		"robotiq_slave_address",
+		default_value="",
+		description="Optional Modbus slave address override for Robotiq gripper. Empty means read from params_file.",
 	)
 	robotiq_fake_hw_arg = DeclareLaunchArgument(
 		"robotiq_fake_hardware",
-		default_value="False",
-		description="Use fake Robotiq hardware",
+		default_value="",
+		description="Optional fake hardware override for Robotiq gripper. Empty means read from params_file.",
 	)
 	robotiq_config_file_arg = DeclareLaunchArgument(
 		"robotiq_config_file",
 		default_value="",
-		description="Optional Robotiq config YAML path",
+		description="Optional Robotiq config YAML path override. Empty means materialize from params_file.",
 	)
 	robotiq_rviz2_arg = DeclareLaunchArgument(
 		"robotiq_rviz2",
-		default_value="False",
-		description="Launch RViz2 for Robotiq visualization",
-	)
-	robotiq_log_level_arg = DeclareLaunchArgument(
-		"robotiq_log_level",
-		default_value="warn",
-		description="ROS log level for robotiq_2f_gripper_node",
+		default_value="",
+		description="Optional RViz2 override for Robotiq visualization. Empty means read from params_file.",
 	)
 
 	ur_type_arg = DeclareLaunchArgument(
@@ -478,6 +618,21 @@ def generate_launch_description() -> LaunchDescription:
 		"launch_teleop_node",
 		default_value="true",
 		description="Launch teleop_control_node input/output loop.",
+	)
+	launch_quest3_bridge_arg = DeclareLaunchArgument(
+		"launch_quest3_bridge",
+		default_value="auto",
+		description="Launch Quest3 WebXR bridge (auto|true|false). auto launches it when input_type resolves to quest3.",
+	)
+	quest3_bridge_params_file_arg = DeclareLaunchArgument(
+		"quest3_bridge_params_file",
+		default_value="",
+		description="Optional params file override for quest3_webxr_bridge_node. Empty means reuse params_file.",
+	)
+	quest3_advertised_host_arg = DeclareLaunchArgument(
+		"quest3_advertised_host",
+		default_value="",
+		description="Optional Quest bridge LAN host/IP override. Empty means read advertised_host from params file.",
 	)
 	data_collector_params_file_arg = DeclareLaunchArgument(
 		"data_collector_params_file",
@@ -561,10 +716,13 @@ def generate_launch_description() -> LaunchDescription:
 			end_effector_arg,
 			robotiq_namespace_arg,
 			robotiq_serial_port_arg,
+			robotiq_baudrate_arg,
+			robotiq_timeout_arg,
+			robotiq_action_timeout_arg,
+			robotiq_slave_address_arg,
 			robotiq_fake_hw_arg,
 			robotiq_config_file_arg,
 			robotiq_rviz2_arg,
-			robotiq_log_level_arg,
 			ur_type_arg,
 			robot_profile_arg,
 			robot_ip_arg,
@@ -573,14 +731,18 @@ def generate_launch_description() -> LaunchDescription:
 			launch_moveit_rviz_arg,
 			launch_servo_arg,
 			initial_joint_controller_arg,
-			enable_moveit_arg,
-			enable_data_collector_arg,
-			launch_teleop_node_arg,
-			data_collector_params_file_arg,
-			commander_pose_max_age_sec_arg,
-			OpaqueFunction(function=_maybe_include_joy_driver),
-			OpaqueFunction(function=_maybe_include_moveit_servo),
-			OpaqueFunction(function=_maybe_include_end_effector_driver),
+				enable_moveit_arg,
+				enable_data_collector_arg,
+				launch_teleop_node_arg,
+				launch_quest3_bridge_arg,
+				quest3_bridge_params_file_arg,
+				quest3_advertised_host_arg,
+				data_collector_params_file_arg,
+				commander_pose_max_age_sec_arg,
+				OpaqueFunction(function=_maybe_include_quest3_bridge),
+				OpaqueFunction(function=_maybe_include_joy_driver),
+				OpaqueFunction(function=_maybe_include_moveit_servo),
+				OpaqueFunction(function=_maybe_include_end_effector_driver),
 			OpaqueFunction(function=_maybe_include_data_collector),
 			ur_launch,
 			robot_commander_node,

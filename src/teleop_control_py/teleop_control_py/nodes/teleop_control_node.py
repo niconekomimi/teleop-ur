@@ -21,7 +21,7 @@ from ..device_manager import (
 )
 from ..hardware.control.gripper_controllers import QbSoftHandController, RobotiqController
 from ..hardware.control.servo_pose_follower import ServoPoseFollower
-from ..hardware.input.input_handlers import JoyInputHandler, MediaPipeInputHandler
+from ..hardware.input import JoyInputHandler, MediaPipeInputHandler, Quest3InputHandler
 from ..utils.transform_utils import apply_velocity_limits
 
 
@@ -51,6 +51,11 @@ class TeleopControlNode(Node):
             angular_vel_param = "mediapipe_max_angular_vel"
             linear_accel_param = "mediapipe_max_linear_accel"
             angular_accel_param = "mediapipe_max_angular_accel"
+        elif self._input_type == "quest3":
+            linear_vel_param = "quest3_max_linear_vel"
+            angular_vel_param = "quest3_max_angular_vel"
+            linear_accel_param = "quest3_max_linear_accel"
+            angular_accel_param = "quest3_max_angular_accel"
 
         self._max_velocity = np.array(
             [
@@ -168,6 +173,52 @@ class TeleopControlNode(Node):
         self.declare_parameter("gripper_axis", -1)
         self.declare_parameter("gripper_axis_inverted", False)
 
+        self.declare_parameter("quest3_connected_topic", "/quest3/connected")
+        self.declare_parameter("quest3_left_pose_topic", "/quest3/left_controller/pose")
+        self.declare_parameter("quest3_right_pose_topic", "/quest3/right_controller/pose")
+        self.declare_parameter("quest3_joy_topic", "/quest3/input/joy")
+        self.declare_parameter("quest3_require_connected", True)
+        self.declare_parameter("quest3_pose_timeout_sec", 0.3)
+        self.declare_parameter("quest3_active_hand", "right")
+        self.declare_parameter("quest3_motion_mode", "target_pose")
+        self.declare_parameter("quest3_deadzone", 0.02)
+        self.declare_parameter("quest3_linear_scale", 1.0)
+        self.declare_parameter("quest3_angular_scale", 1.0)
+        self.declare_parameter("quest3_position_linear_gain", 7.0)
+        self.declare_parameter("quest3_position_angular_gain", 5.0)
+        self.declare_parameter("quest3_max_linear_vel", 2.8)
+        self.declare_parameter("quest3_max_angular_vel", 5.0)
+        self.declare_parameter("quest3_max_linear_accel", 10.0)
+        self.declare_parameter("quest3_max_angular_accel", 18.0)
+        self.declare_parameter("quest3_linear_axis_mapping", [0, 1, 2])
+        self.declare_parameter("quest3_angular_axis_mapping", [0, 1, 2])
+        self.declare_parameter("quest3_linear_axis_sign", [1.0, 1.0, 1.0])
+        self.declare_parameter("quest3_angular_axis_sign", [1.0, 1.0, 1.0])
+        self.declare_parameter("quest3_orientation_mode", "hand_relative")
+        self.declare_parameter("quest3_orientation_axis_mapping", [0, 1, 2])
+        self.declare_parameter("quest3_orientation_axis_sign", [1.0, 1.0, 1.0])
+        self.declare_parameter("quest3_enable_input_smoothing", False)
+        self.declare_parameter("quest3_smoothing_alpha", 0.45)
+        self.declare_parameter("quest3_frame_reset_enabled", True)
+        self.declare_parameter("quest3_frame_reset_scope", "active_hand")
+        self.declare_parameter("quest3_frame_reset_hold_sec", 0.75)
+        self.declare_parameter("quest3_left_frame_reset_buttons", [4, 5])
+        self.declare_parameter("quest3_right_frame_reset_buttons", [10, 11])
+        self.declare_parameter("quest3_clutch_filter_enabled", True)
+        self.declare_parameter("quest3_clutch_engage_confirm_sec", 0.02)
+        self.declare_parameter("quest3_clutch_release_confirm_sec", 0.02)
+        self.declare_parameter("quest3_clutch_axis_threshold", 0.15)
+        self.declare_parameter("quest3_left_clutch_axis", 1)
+        self.declare_parameter("quest3_right_clutch_axis", 7)
+        self.declare_parameter("quest3_left_clutch_button", 1)
+        self.declare_parameter("quest3_right_clutch_button", 7)
+        self.declare_parameter("quest3_left_trigger_axis", 0)
+        self.declare_parameter("quest3_right_trigger_axis", 6)
+        self.declare_parameter("quest3_left_trigger_button", 0)
+        self.declare_parameter("quest3_right_trigger_button", 6)
+        self.declare_parameter("quest3_gripper_requires_clutch", True)
+        self.declare_parameter("quest3_gripper_axis_inverted", False)
+
         self.declare_parameter("mediapipe_input_topic", "/camera/camera/color/image_raw")
         self.declare_parameter("mediapipe_topic", "")
         self.declare_parameter("mediapipe_depth_topic", "/camera/camera/aligned_depth_to_color/image_raw")
@@ -231,6 +282,7 @@ class TeleopControlNode(Node):
         strategies = {
             "joy": JoyInputHandler,
             "mediapipe": MediaPipeInputHandler,
+            "quest3": Quest3InputHandler,
         }
         handler_cls = strategies.get(input_type)
         if handler_cls is None:

@@ -3,7 +3,7 @@
   <name>teleop_control_py</name>
   <version>0.1.0</version>
   <description>MediaPipe hand teleoperation for UR5 and SoftHand.</description>
-  <maintainer email="rvl@example.com">rvl</maintainer>
+  <maintainer email="673269043@qq.com">rvl</maintainer>
   <license>Apache-2.0</license>
 
   <buildtool_depend>ament_python</buildtool_depend>
