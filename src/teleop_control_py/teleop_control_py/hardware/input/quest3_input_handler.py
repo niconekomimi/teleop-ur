@@ -20,6 +20,9 @@ from ...utils.home_zone_utils import compute_pose_error
 from ...utils.transform_utils import (
     _clamp,
     apply_deadzone,
+    clip_rotvec_magnitude,
+    finite_difference_body_angular_velocity,
+    finite_difference_linear_velocity,
     quat_multiply_xyzw,
     quat_normalize_xyzw,
     quat_to_shortest_rotvec_xyzw,
@@ -89,6 +92,9 @@ class Quest3InputHandler(InputHandlerBase):
             self._orientation_mode = "hand_relative"
         self._orientation_mapping = self._vector3_param("quest3_orientation_axis_mapping", [0, 1, 2], cast=int)
         self._orientation_sign = self._vector3_param("quest3_orientation_axis_sign", [1.0, 1.0, 1.0], cast=float)
+        self._max_relative_orientation_rad = math.radians(
+            max(0.0, float(node.get_parameter("quest3_max_relative_orientation_deg").value))
+        )
         self._enable_input_smoothing = bool(node.get_parameter("quest3_enable_input_smoothing").value)
         smoothing_alpha = float(node.get_parameter("quest3_smoothing_alpha").value)
         self._frame_reset_enabled = bool(node.get_parameter("quest3_frame_reset_enabled").value)
@@ -144,6 +150,9 @@ class Quest3InputHandler(InputHandlerBase):
         self._initial_input_quat: Optional[np.ndarray] = None
         self._initial_robot_pos: Optional[np.ndarray] = None
         self._initial_robot_quat: Optional[np.ndarray] = None
+        self._previous_input_pos: Optional[np.ndarray] = None
+        self._previous_input_quat: Optional[np.ndarray] = None
+        self._previous_input_stamp_monotonic: float = 0.0
         self._frame_origin_pos: dict[str, Optional[np.ndarray]] = {"left": None, "right": None}
         self._frame_origin_quat: dict[str, Optional[np.ndarray]] = {"left": None, "right": None}
         self._frame_reset_hold_since: dict[str, float] = {"left": 0.0, "right": 0.0}
@@ -163,7 +172,8 @@ class Quest3InputHandler(InputHandlerBase):
             f"input_smoothing={'on' if self._enable_input_smoothing else 'off'}, "
             f"frame_reset={'on' if self._frame_reset_enabled else 'off'}, "
             f"frame_reset_scope={self._frame_reset_scope}, "
-            f"frame_reset_rotate_position={'on' if self._frame_reset_rotate_position else 'off'}"
+            f"frame_reset_rotate_position={'on' if self._frame_reset_rotate_position else 'off'}, "
+            f"max_relative_orientation_deg={math.degrees(self._max_relative_orientation_rad):.1f}"
         )
 
     def _vector3_param(self, name: str, default: Sequence[float], *, cast):
@@ -194,6 +204,14 @@ class Quest3InputHandler(InputHandlerBase):
 
     def _safe_button(self, values: Sequence[int], index: int) -> bool:
         return 0 <= index < len(values) and bool(values[index])
+
+    def _select_axis(self, values: np.ndarray, mapping: list[int], signs: list[float], scale: float) -> np.ndarray:
+        out = np.zeros(3, dtype=np.float64)
+        for i in range(3):
+            source_index = int(mapping[i])
+            raw = float(values[source_index]) if 0 <= source_index < len(values) else 0.0
+            out[i] = apply_deadzone(raw, self._deadzone) * float(scale) * float(signs[i])
+        return out
 
     def _connected_callback(self, msg: Bool) -> None:
         self._connected = bool(msg.data)
@@ -279,11 +297,11 @@ class Quest3InputHandler(InputHandlerBase):
         self._initial_input_quat = None
         self._initial_robot_pos = None
         self._initial_robot_quat = None
+        self._previous_input_pos = None
+        self._previous_input_quat = None
+        self._previous_input_stamp_monotonic = 0.0
         self._linear_filter.reset(np.zeros(3, dtype=np.float64))
         self._angular_filter.reset(np.zeros(3, dtype=np.float64))
-
-    def _apply_deadzone(self, value: float) -> float:
-        return float(apply_deadzone(value, self._deadzone))
 
     def _clutch_filter(self, desired: bool, now_ns: int) -> bool:
         if not self._clutch_filter_enabled:
@@ -305,14 +323,6 @@ class Quest3InputHandler(InputHandlerBase):
             self._clutch_filtered = desired
             self._clutch_candidate = None
         return self._clutch_filtered
-
-    def _select_axis(self, values: np.ndarray, mapping: list[int], signs: list[float], scale: float) -> np.ndarray:
-        out = np.zeros(3, dtype=np.float64)
-        for i in range(3):
-            source_index = int(mapping[i])
-            raw = float(values[source_index]) if 0 <= source_index < len(values) else 0.0
-            out[i] = self._apply_deadzone(raw) * float(scale) * float(signs[i])
-        return out
 
     def _build_twist(self, linear_values: np.ndarray, angular_values: np.ndarray) -> Twist:
         twist = _zero_twist()
@@ -417,7 +427,25 @@ class Quest3InputHandler(InputHandlerBase):
 
         q_delta = relative_body_quat_delta_xyzw(self._initial_input_quat, current_input_quat)
         rotvec = quat_to_shortest_rotvec_xyzw(q_delta)
+        rotvec = clip_rotvec_magnitude(rotvec, self._max_relative_orientation_rad)
         mapped = self._select_axis(rotvec, self._orientation_mapping, self._orientation_sign, self._angular_scale)
+        return self._apply_angular_smoothing(mapped)
+
+    def _compute_angular_velocity(
+        self,
+        previous_input_quat: Optional[np.ndarray],
+        current_input_quat: Optional[np.ndarray],
+        dt_sec: float,
+    ) -> np.ndarray:
+        if (
+            self._orientation_mode != "hand_relative"
+            or previous_input_quat is None
+            or current_input_quat is None
+        ):
+            return np.zeros(3, dtype=np.float64)
+
+        angular_velocity = finite_difference_body_angular_velocity(previous_input_quat, current_input_quat, dt_sec)
+        mapped = self._select_axis(angular_velocity, self._angular_mapping, self._angular_sign, self._angular_scale)
         return self._apply_angular_smoothing(mapped)
 
     def _build_pose_target_twist(
@@ -450,6 +478,40 @@ class Quest3InputHandler(InputHandlerBase):
         pos_error, rot_error = compute_pose_error(current_pos, current_quat, target_pos, target_quat)
         linear_values = pos_error * self._position_linear_gain
         angular_values = rot_error * self._position_angular_gain
+        return self._build_twist(linear_values, angular_values)
+
+    def _build_velocity_twist(
+        self,
+        controller_pos: np.ndarray,
+        controller_quat: Optional[np.ndarray],
+        controller_stamp_monotonic: float,
+    ) -> Twist:
+        if (
+            self._previous_input_pos is None
+            or self._previous_input_quat is None
+            or self._previous_input_stamp_monotonic <= 0.0
+        ):
+            self._previous_input_pos = controller_pos.copy()
+            self._previous_input_quat = None if controller_quat is None else controller_quat.copy()
+            self._previous_input_stamp_monotonic = float(controller_stamp_monotonic)
+            return _zero_twist()
+
+        dt_sec = float(controller_stamp_monotonic - self._previous_input_stamp_monotonic)
+        if dt_sec <= 1e-6:
+            return _zero_twist()
+
+        linear_velocity = finite_difference_linear_velocity(
+            self._previous_input_pos,
+            controller_pos,
+            dt_sec,
+        )
+        linear_values = self._select_axis(linear_velocity, self._linear_mapping, self._linear_sign, self._linear_scale)
+        linear_values = self._apply_linear_smoothing(linear_values)
+        angular_values = self._compute_angular_velocity(self._previous_input_quat, controller_quat, dt_sec)
+
+        self._previous_input_pos = controller_pos.copy()
+        self._previous_input_quat = None if controller_quat is None else controller_quat.copy()
+        self._previous_input_stamp_monotonic = float(controller_stamp_monotonic)
         return self._build_twist(linear_values, angular_values)
 
     def _controller_clutch_desired(self, side: str, state: _QuestControllerState) -> bool:
@@ -498,6 +560,9 @@ class Quest3InputHandler(InputHandlerBase):
                     self._initial_robot_quat = current_pose[1].copy()
                 self._linear_filter.reset(np.zeros(3, dtype=np.float64))
                 self._angular_filter.reset(np.zeros(3, dtype=np.float64))
+                self._previous_input_pos = controller_pos.copy()
+                self._previous_input_quat = None if controller_quat is None else controller_quat.copy()
+                self._previous_input_stamp_monotonic = float(state.pose_stamp_monotonic)
                 self._teleop_active = True
                 self.node.get_logger().info(
                     f"Quest3 clutch engaged; teleop active ({self._motion_mode}, hand={self._active_hand})"
@@ -507,17 +572,8 @@ class Quest3InputHandler(InputHandlerBase):
                 pose_twist = self._build_pose_target_twist(controller_pos, controller_quat)
                 if pose_twist is not None:
                     twist = pose_twist
-            elif self._initial_input_pos is not None:
-                delta_input = controller_pos - self._initial_input_pos
-                linear_values = self._select_axis(
-                    delta_input,
-                    self._linear_mapping,
-                    self._linear_sign,
-                    self._linear_scale,
-                )
-                linear_values = self._apply_linear_smoothing(linear_values)
-                angular_values = self._compute_angular_delta(controller_quat)
-                twist = self._build_twist(linear_values, angular_values)
+            else:
+                twist = self._build_velocity_twist(controller_pos, controller_quat, state.pose_stamp_monotonic)
         else:
             if self._teleop_active:
                 reason = "clutch released"

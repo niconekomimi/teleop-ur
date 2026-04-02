@@ -8,6 +8,7 @@ import sys
 import threading
 import time
 from collections import deque
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Callable, Dict, Optional
@@ -266,6 +267,19 @@ def build_robot_state_vector(robot_state: Optional[dict]) -> Optional[np.ndarray
     return np.asarray([*joints, float(gripper)], dtype=np.float32)
 
 
+@dataclass(frozen=True)
+class InferenceActionSample:
+    action: np.ndarray
+    cycle_compute_ms: float
+    camera_fetch_ms: float
+    preprocess_ms: float
+    robot_state_ms: float
+    policy_call_ms: float
+    is_replan_step: bool
+    plan_step_idx: int
+    replan_every: int
+
+
 class InferenceWorker(QThread):
     action_signal = Signal(object)
     preview_signal = Signal(object, object)
@@ -417,6 +431,7 @@ class InferenceWorker(QThread):
 
         return None, None
 
+
     def run(self) -> None:
         global_camera = None
         wrist_camera = None
@@ -467,9 +482,12 @@ class InferenceWorker(QThread):
             next_cycle = time.perf_counter()
             while self._running:
                 cycle_start = time.perf_counter()
+                camera_fetch_ms = 0.0
                 if completed_cycles:
+                    fetch_start = time.perf_counter()
                     global_bgr = global_camera.get_bgr_frame()
                     wrist_bgr = wrist_camera.get_bgr_frame()
+                    camera_fetch_ms = (time.perf_counter() - fetch_start) * 1000.0
 
                 if global_bgr is None or wrist_bgr is None:
                     self.status_signal.emit("等待相机帧")
@@ -479,26 +497,68 @@ class InferenceWorker(QThread):
 
                 self._consume_pending_task_update(policy)
                 self.preview_signal.emit(global_bgr, wrist_bgr)
+                preprocess_start = time.perf_counter()
                 agentview_rgb = center_crop_square_and_resize_rgb(global_bgr, agentview_size)
                 wrist_rgb = center_crop_square_and_resize_rgb(wrist_bgr, wrist_size)
+                preprocess_ms = (time.perf_counter() - preprocess_start) * 1000.0
+
+                robot_state_start = time.perf_counter()
                 robot_state = self._read_robot_state()
+                robot_state_ms = (time.perf_counter() - robot_state_start) * 1000.0
+
+                agent = getattr(policy, "agent", None)
+                raw_plan_step_idx = getattr(agent, "_steps_since_plan", -1)
+                raw_replan_every = getattr(agent, "replan_every", 0)
+                try:
+                    plan_step_idx = max(0, int(raw_plan_step_idx))
+                except Exception:
+                    plan_step_idx = 0
+                try:
+                    replan_every = max(1, int(raw_replan_every))
+                except Exception:
+                    replan_every = 1
+                is_replan_step = plan_step_idx == 0
+
+                policy_call_start = time.perf_counter()
                 action = policy.predict_action(
                     agentview_image=agentview_rgb,
                     eye_in_hand_image=wrist_rgb,
                     robot_states=robot_state,
                 )
+                policy_call_ms = (time.perf_counter() - policy_call_start) * 1000.0
                 action = np.asarray(action, dtype=np.float32).reshape(-1)
-                self.action_signal.emit(action)
 
                 now = time.perf_counter()
+                cycle_compute_ms = (now - cycle_start) * 1000.0
+                self.action_signal.emit(
+                    InferenceActionSample(
+                        action=action,
+                        cycle_compute_ms=float(cycle_compute_ms),
+                        camera_fetch_ms=float(camera_fetch_ms),
+                        preprocess_ms=float(preprocess_ms),
+                        robot_state_ms=float(robot_state_ms),
+                        policy_call_ms=float(policy_call_ms),
+                        is_replan_step=bool(is_replan_step),
+                        plan_step_idx=int(plan_step_idx),
+                        replan_every=int(replan_every),
+                    )
+                )
+
                 completed_cycles.append(now)
                 if len(completed_cycles) >= 2:
                     window_elapsed = max(completed_cycles[-1] - completed_cycles[0], 1e-6)
                     actual_hz = (len(completed_cycles) - 1) / window_elapsed
                 else:
                     actual_hz = 0.0
-                latency_ms = (now - cycle_start) * 1000.0
-                self.status_signal.emit(f"运行中 | {actual_hz:.2f} Hz | {latency_ms:.1f} ms")
+
+                phase_label = f"重规划 {plan_step_idx + 1}/{replan_every}" if is_replan_step else f"缓存步 {plan_step_idx + 1}/{replan_every}"
+                self.status_signal.emit(
+                    "运行中 | "
+                    f"高层动作输出 {actual_hz:.2f} Hz | "
+                    f"策略 {policy_call_ms:.1f} ms | "
+                    f"循环 {cycle_compute_ms:.1f} ms | "
+                    f"{phase_label}"
+                )
 
                 next_cycle += target_period
                 sleep_duration = next_cycle - time.perf_counter()

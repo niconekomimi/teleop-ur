@@ -105,6 +105,105 @@ def relative_body_quat_delta_xyzw(start_quat_xyzw: np.ndarray, current_quat_xyzw
     return _quat_normalize_xyzw(q_delta)
 
 
+def finite_difference_linear_velocity(
+    previous_pos_xyz: np.ndarray,
+    current_pos_xyz: np.ndarray,
+    dt_sec: float,
+) -> np.ndarray:
+    """根据相邻位置样本计算线速度。"""
+    if not math.isfinite(dt_sec) or dt_sec <= 1e-6:
+        return np.zeros(3, dtype=np.float64)
+    previous = np.asarray(previous_pos_xyz, dtype=np.float64).reshape(3)
+    current = np.asarray(current_pos_xyz, dtype=np.float64).reshape(3)
+    return ((current - previous) / float(dt_sec)).astype(np.float64)
+
+
+def finite_difference_body_angular_velocity(
+    previous_quat_xyzw: np.ndarray,
+    current_quat_xyzw: np.ndarray,
+    dt_sec: float,
+) -> np.ndarray:
+    """根据相邻姿态样本计算局部坐标系下的角速度。"""
+    if not math.isfinite(dt_sec) or dt_sec <= 1e-6:
+        return np.zeros(3, dtype=np.float64)
+    q_delta = relative_body_quat_delta_xyzw(previous_quat_xyzw, current_quat_xyzw)
+    rotvec = quat_to_shortest_rotvec_xyzw(q_delta)
+    return (rotvec / float(dt_sec)).astype(np.float64)
+
+
+def axis_mapping_sign_to_rotation_matrix(mapping: Sequence[int], signs: Sequence[float]) -> np.ndarray:
+    """将 3 轴映射/符号配置转换为正规旋转矩阵。"""
+    if len(mapping) != 3 or len(signs) != 3:
+        raise ValueError("mapping and signs must both have length 3")
+
+    matrix = np.zeros((3, 3), dtype=np.float64)
+    seen: set[int] = set()
+    for row, source_index in enumerate(mapping):
+        source = int(source_index)
+        if source < 0 or source > 2 or source in seen:
+            raise ValueError(f"invalid axis mapping: {list(mapping)}")
+        seen.add(source)
+        sign = float(signs[row])
+        if not math.isclose(abs(sign), 1.0, abs_tol=1e-9):
+            raise ValueError(f"axis signs must be +/-1.0, got {list(signs)}")
+        matrix[row, source] = sign
+
+    if not np.allclose(matrix @ matrix.T, np.eye(3), atol=1e-9):
+        raise ValueError("axis mapping does not form an orthonormal basis")
+    determinant = float(np.linalg.det(matrix))
+    if not math.isclose(determinant, 1.0, abs_tol=1e-9):
+        raise ValueError(f"axis mapping must define a proper rotation, got det={determinant:.6f}")
+    return matrix
+
+
+def rotmat_to_quat_xyzw(rotation: np.ndarray) -> np.ndarray:
+    """旋转矩阵转 XYZW 四元数。"""
+    rotation = np.asarray(rotation, dtype=np.float64).reshape(3, 3)
+    m00, m01, m02 = float(rotation[0, 0]), float(rotation[0, 1]), float(rotation[0, 2])
+    m10, m11, m12 = float(rotation[1, 0]), float(rotation[1, 1]), float(rotation[1, 2])
+    m20, m21, m22 = float(rotation[2, 0]), float(rotation[2, 1]), float(rotation[2, 2])
+
+    trace = m00 + m11 + m22
+    if trace > 0.0:
+        scale = math.sqrt(trace + 1.0) * 2.0
+        qw = 0.25 * scale
+        qx = (m21 - m12) / scale
+        qy = (m02 - m20) / scale
+        qz = (m10 - m01) / scale
+    elif (m00 > m11) and (m00 > m22):
+        scale = math.sqrt(1.0 + m00 - m11 - m22) * 2.0
+        qw = (m21 - m12) / scale
+        qx = 0.25 * scale
+        qy = (m01 + m10) / scale
+        qz = (m02 + m20) / scale
+    elif m11 > m22:
+        scale = math.sqrt(1.0 + m11 - m00 - m22) * 2.0
+        qw = (m02 - m20) / scale
+        qx = (m01 + m10) / scale
+        qy = 0.25 * scale
+        qz = (m12 + m21) / scale
+    else:
+        scale = math.sqrt(1.0 + m22 - m00 - m11) * 2.0
+        qw = (m10 - m01) / scale
+        qx = (m02 + m20) / scale
+        qy = (m12 + m21) / scale
+        qz = 0.25 * scale
+
+    return _quat_normalize_xyzw(np.array([qx, qy, qz, qw], dtype=np.float64))
+
+
+def clip_rotvec_magnitude(rotvec_xyz: np.ndarray, max_angle_rad: float) -> np.ndarray:
+    """限制旋转向量模长，避免单次目标姿态跨越过大。"""
+    rotvec = np.asarray(rotvec_xyz, dtype=np.float64).reshape(3)
+    limit = max(0.0, float(max_angle_rad))
+    if limit <= 0.0:
+        return rotvec
+    norm = float(np.linalg.norm(rotvec))
+    if norm <= limit or norm <= 1e-12:
+        return rotvec
+    return (rotvec * (limit / norm)).astype(np.float64)
+
+
 def rebase_pose_with_origin_xyzw(
     raw_pos_xyz: np.ndarray,
     raw_quat_xyzw: np.ndarray,

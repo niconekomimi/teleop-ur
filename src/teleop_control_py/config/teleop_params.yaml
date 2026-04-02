@@ -110,7 +110,10 @@ teleop_control_node:
     quest3_max_angular_vel: 5.0
     quest3_max_linear_accel: 14.0
     quest3_max_angular_accel: 24.0
+    # 单次 clutch 期间允许的最大相对姿态偏转，超过后会被截断，避免大幅 wrist 翻转直接把目标姿态拉爆。
+    quest3_max_relative_orientation_deg: 90.0
     quest3_linear_axis_mapping: [0, 2, 1]
+    # 旋转沿用当前 Quest3 已实测调顺的轴映射，避免大改坐标定义后再引入方向回归。
     quest3_angular_axis_mapping: [1, 0, 2]
     quest3_linear_axis_sign: [-1.0, 1.0, 1.0]
     quest3_angular_axis_sign: [-1.0, -1.0, 1.0]
