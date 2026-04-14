@@ -8,6 +8,7 @@ import sys
 import threading
 import time
 from collections import deque
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Callable, Dict, Optional
@@ -59,6 +60,7 @@ MODELS_ROOT = WORKSPACE_ROOT / "models"
 DATA_ROOT = WORKSPACE_ROOT / "data"
 TASK_EMBEDDINGS_ROOT = REAL_IL_ROOT / "task_embeddings"
 ROOT_ENV_NAME = "root"
+DEFAULT_PREVIEW_HZ = 30.0
 
 
 def _normalize_camera_source(source: str) -> str:
@@ -266,6 +268,19 @@ def build_robot_state_vector(robot_state: Optional[dict]) -> Optional[np.ndarray
     return np.asarray([*joints, float(gripper)], dtype=np.float32)
 
 
+@dataclass(frozen=True)
+class InferenceActionSample:
+    action: np.ndarray
+    cycle_compute_ms: float
+    camera_fetch_ms: float
+    preprocess_ms: float
+    robot_state_ms: float
+    policy_call_ms: float
+    is_replan_step: bool
+    plan_step_idx: int
+    replan_every: int
+
+
 class InferenceWorker(QThread):
     action_signal = Signal(object)
     preview_signal = Signal(object, object)
@@ -287,6 +302,7 @@ class InferenceWorker(QThread):
         wrist_camera_serial_number: str = "",
         global_camera_enable_depth: bool = False,
         wrist_camera_enable_depth: bool = False,
+        preview_hz: float = DEFAULT_PREVIEW_HZ,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -300,11 +316,16 @@ class InferenceWorker(QThread):
         self.global_camera_enable_depth = bool(global_camera_enable_depth)
         self.wrist_camera_enable_depth = bool(wrist_camera_enable_depth)
         self.loop_hz = max(0.2, float(loop_hz))
+        self.preview_hz = max(0.2, float(preview_hz))
         self.device = str(device).strip() if device else None
         self.state_provider = state_provider
         self._running = True
+        self._camera_fetch_lock = threading.Lock()
         self._task_update_lock = threading.Lock()
         self._pending_task_update: Optional[tuple[str, str]] = None
+        self._preview_enabled_event = threading.Event()
+        self._preview_stop_event = threading.Event()
+        self._preview_thread: Optional[threading.Thread] = None
 
     def info(self, message: str) -> None:
         self.log_signal.emit(str(message))
@@ -314,6 +335,14 @@ class InferenceWorker(QThread):
 
     def stop(self) -> None:
         self._running = False
+        self._preview_enabled_event.set()
+        self._preview_stop_event.set()
+
+    def set_preview_streaming(self, enabled: bool) -> None:
+        if enabled:
+            self._preview_enabled_event.set()
+            return
+        self._preview_enabled_event.clear()
 
     def request_task_update(self, task_name: str, task_embedding_path: str) -> None:
         normalized_task_name = str(task_name).strip()
@@ -399,16 +428,81 @@ class InferenceWorker(QThread):
         state = np.asarray(state, dtype=np.float32).reshape(-1)
         return state if state.size > 0 else None
 
+    def _read_camera_pair(self, global_camera, wrist_camera) -> tuple[Optional[np.ndarray], Optional[np.ndarray], float]:
+        with self._camera_fetch_lock:
+            fetch_start = time.perf_counter()
+            global_bgr = global_camera.get_bgr_frame()
+            wrist_bgr = wrist_camera.get_bgr_frame()
+            fetch_ms = (time.perf_counter() - fetch_start) * 1000.0
+        return global_bgr, wrist_bgr, float(fetch_ms)
+
+    @staticmethod
+    def _copy_preview_frame(frame: Optional[np.ndarray]) -> Optional[np.ndarray]:
+        if frame is None:
+            return None
+        return np.ascontiguousarray(frame).copy()
+
+    def _emit_preview_frame_pair(self, global_bgr, wrist_bgr) -> None:
+        if global_bgr is None and wrist_bgr is None:
+            return
+        self.preview_signal.emit(
+            self._copy_preview_frame(global_bgr),
+            self._copy_preview_frame(wrist_bgr),
+        )
+
+    def _preview_loop(self, global_camera, wrist_camera) -> None:
+        target_period = 1.0 / max(self.preview_hz, 1e-6)
+        next_cycle = time.perf_counter()
+        while self._running and not self._preview_stop_event.is_set():
+            if not self._preview_enabled_event.is_set():
+                next_cycle = time.perf_counter()
+                if self._preview_stop_event.wait(0.1):
+                    break
+                continue
+
+            try:
+                global_bgr, wrist_bgr, _fetch_ms = self._read_camera_pair(global_camera, wrist_camera)
+            except Exception:
+                if self._preview_stop_event.wait(min(target_period, 0.1)):
+                    break
+                next_cycle = time.perf_counter()
+                continue
+
+            if global_bgr is not None or wrist_bgr is not None:
+                self._emit_preview_frame_pair(global_bgr, wrist_bgr)
+
+            next_cycle += target_period
+            sleep_duration = next_cycle - time.perf_counter()
+            if sleep_duration > 0:
+                if self._preview_stop_event.wait(sleep_duration):
+                    break
+            else:
+                next_cycle = time.perf_counter()
+
+    def _start_preview_thread(self, global_camera, wrist_camera) -> None:
+        thread = self._preview_thread
+        if thread is not None and thread.is_alive():
+            return
+        self._preview_stop_event.clear()
+        self._preview_thread = threading.Thread(
+            target=self._preview_loop,
+            args=(global_camera, wrist_camera),
+            name="InferencePreviewThread",
+            daemon=True,
+        )
+        self._preview_thread.start()
+
+    def _stop_preview_thread(self, timeout_sec: float = 1.0) -> None:
+        thread = self._preview_thread
+        self._preview_thread = None
+        self._preview_enabled_event.set()
+        self._preview_stop_event.set()
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=timeout_sec)
+
     def _wait_for_initial_frames(self, global_camera, wrist_camera) -> tuple[Optional[np.ndarray], Optional[np.ndarray]]:
-        global_bgr = None
-        wrist_bgr = None
-
         while self._running:
-            if global_bgr is None:
-                global_bgr = global_camera.get_bgr_frame()
-            if wrist_bgr is None:
-                wrist_bgr = wrist_camera.get_bgr_frame()
-
+            global_bgr, wrist_bgr, _fetch_ms = self._read_camera_pair(global_camera, wrist_camera)
             if global_bgr is not None and wrist_bgr is not None:
                 return global_bgr, wrist_bgr
 
@@ -416,6 +510,7 @@ class InferenceWorker(QThread):
             time.sleep(0.01)
 
         return None, None
+
 
     def run(self) -> None:
         global_camera = None
@@ -452,7 +547,8 @@ class InferenceWorker(QThread):
                 return
             if global_bgr is None or wrist_bgr is None:
                 raise RuntimeError("相机已打开，但未收到首帧")
-            self.preview_signal.emit(global_bgr, wrist_bgr)
+            self._emit_preview_frame_pair(global_bgr, wrist_bgr)
+            self._start_preview_thread(global_camera, wrist_camera)
 
             self.log_signal.emit(
                 "推理已启动: "
@@ -467,9 +563,7 @@ class InferenceWorker(QThread):
             next_cycle = time.perf_counter()
             while self._running:
                 cycle_start = time.perf_counter()
-                if completed_cycles:
-                    global_bgr = global_camera.get_bgr_frame()
-                    wrist_bgr = wrist_camera.get_bgr_frame()
+                global_bgr, wrist_bgr, camera_fetch_ms = self._read_camera_pair(global_camera, wrist_camera)
 
                 if global_bgr is None or wrist_bgr is None:
                     self.status_signal.emit("等待相机帧")
@@ -478,27 +572,68 @@ class InferenceWorker(QThread):
                     continue
 
                 self._consume_pending_task_update(policy)
-                self.preview_signal.emit(global_bgr, wrist_bgr)
+                preprocess_start = time.perf_counter()
                 agentview_rgb = center_crop_square_and_resize_rgb(global_bgr, agentview_size)
                 wrist_rgb = center_crop_square_and_resize_rgb(wrist_bgr, wrist_size)
+                preprocess_ms = (time.perf_counter() - preprocess_start) * 1000.0
+
+                robot_state_start = time.perf_counter()
                 robot_state = self._read_robot_state()
+                robot_state_ms = (time.perf_counter() - robot_state_start) * 1000.0
+
+                agent = getattr(policy, "agent", None)
+                raw_plan_step_idx = getattr(agent, "_steps_since_plan", -1)
+                raw_replan_every = getattr(agent, "replan_every", 0)
+                try:
+                    plan_step_idx = max(0, int(raw_plan_step_idx))
+                except Exception:
+                    plan_step_idx = 0
+                try:
+                    replan_every = max(1, int(raw_replan_every))
+                except Exception:
+                    replan_every = 1
+                is_replan_step = plan_step_idx == 0
+
+                policy_call_start = time.perf_counter()
                 action = policy.predict_action(
                     agentview_image=agentview_rgb,
                     eye_in_hand_image=wrist_rgb,
                     robot_states=robot_state,
                 )
+                policy_call_ms = (time.perf_counter() - policy_call_start) * 1000.0
                 action = np.asarray(action, dtype=np.float32).reshape(-1)
-                self.action_signal.emit(action)
 
                 now = time.perf_counter()
+                cycle_compute_ms = (now - cycle_start) * 1000.0
+                self.action_signal.emit(
+                    InferenceActionSample(
+                        action=action,
+                        cycle_compute_ms=float(cycle_compute_ms),
+                        camera_fetch_ms=float(camera_fetch_ms),
+                        preprocess_ms=float(preprocess_ms),
+                        robot_state_ms=float(robot_state_ms),
+                        policy_call_ms=float(policy_call_ms),
+                        is_replan_step=bool(is_replan_step),
+                        plan_step_idx=int(plan_step_idx),
+                        replan_every=int(replan_every),
+                    )
+                )
+
                 completed_cycles.append(now)
                 if len(completed_cycles) >= 2:
                     window_elapsed = max(completed_cycles[-1] - completed_cycles[0], 1e-6)
                     actual_hz = (len(completed_cycles) - 1) / window_elapsed
                 else:
                     actual_hz = 0.0
-                latency_ms = (now - cycle_start) * 1000.0
-                self.status_signal.emit(f"运行中 | {actual_hz:.2f} Hz | {latency_ms:.1f} ms")
+
+                phase_label = f"重规划 {plan_step_idx + 1}/{replan_every}" if is_replan_step else f"缓存步 {plan_step_idx + 1}/{replan_every}"
+                self.status_signal.emit(
+                    "运行中 | "
+                    f"高层动作输出 {actual_hz:.2f} Hz | "
+                    f"策略 {policy_call_ms:.1f} ms | "
+                    f"循环 {cycle_compute_ms:.1f} ms | "
+                    f"{phase_label}"
+                )
 
                 next_cycle += target_period
                 sleep_duration = next_cycle - time.perf_counter()
@@ -509,6 +644,7 @@ class InferenceWorker(QThread):
         except Exception as exc:
             self.error_signal.emit(str(exc))
         finally:
+            self._stop_preview_thread()
             for camera in (global_camera, wrist_camera):
                 if camera is None:
                     continue

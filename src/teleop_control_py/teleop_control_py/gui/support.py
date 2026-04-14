@@ -41,6 +41,13 @@ class GuiSettings:
     default_inference_wrist_camera_source: str
     default_inference_wrist_camera_model: str
     default_inference_wrist_camera_serial_number: str
+    default_inference_model_dir: str
+    default_inference_env: str
+    default_inference_task: str
+    default_inference_embedding_path: str
+    default_inference_device: str
+    default_inference_hz: float
+    collect_inference_action_logs: bool
     camera_driver_options: List[str]
     default_camera_driver: str
     default_global_camera_source: str
@@ -259,6 +266,13 @@ def load_gui_settings(current_file: str | Path) -> GuiSettings:
                 raw.get("default_collector_wrist_camera_serial_number", ""),
             )
         ),
+        default_inference_model_dir=str(raw.get("default_inference_model_dir", "")),
+        default_inference_env=str(raw.get("default_inference_env", "")),
+        default_inference_task=str(raw.get("default_inference_task", "")),
+        default_inference_embedding_path=str(raw.get("default_inference_embedding_path", "")),
+        default_inference_device=str(raw.get("default_inference_device", "cuda")).strip().lower() or "cuda",
+        default_inference_hz=float(raw.get("default_inference_hz", 10.0)),
+        collect_inference_action_logs=_as_bool(raw.get("collect_inference_action_logs", False), False),
         camera_driver_options=[str(v) for v in raw.get("camera_driver_options", ["realsense", "oakd"])],
         default_camera_driver=str(raw.get("default_camera_driver", "realsense")),
         default_global_camera_source=default_global_camera_source,

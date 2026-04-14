@@ -1,9 +1,11 @@
+from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
 import numpy as np
 from PySide6.QtCore import QTimer, Slot, Qt
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDockWidget,
     QDoubleSpinBox,
@@ -45,6 +47,7 @@ from teleop_control_py.gui.support import (
 )
 from teleop_control_py.device_manager import load_robot_profile, robot_profile_name_from_ur_type
 from teleop_control_py.core.inference_worker import (
+    InferenceActionSample,
     MODELS_ROOT,
     TASK_EMBEDDINGS_ROOT,
     discover_checkpoint_dirs,
@@ -64,6 +67,7 @@ from .app_service import (
 )
 from .http_preview_worker import HttpPreviewWorker
 from .intent_controller import GuiIntentController, IntentResult
+from .preview_recording_worker import PreviewRecordingWorker
 from .runtime_facade import GuiRuntimeFacade
 from .widgets import CameraPreviewWindow, HDF5ViewerDialog
 
@@ -105,6 +109,8 @@ class TeleopMainWindow(QMainWindow):
         self._preview_api_active = False
         self._latest_inference_global_bgr = None
         self._latest_inference_wrist_bgr = None
+        self._preview_recording_worker = None
+        self._preview_recording_session_dir: Optional[Path] = None
         self.module_status_labels = {}
         self.hardware_status_labels = {}
         self.toolbar_runtime_label = None
@@ -115,6 +121,13 @@ class TeleopMainWindow(QMainWindow):
         self._active_teleop_camera_serial = ""
         self._sdk_cameras: list[dict[str, str]] = []
         self._camera_options_loaded = False
+        self._suspend_gui_settings_persist = False
+        self._pending_inference_execution_start = False
+        self._pending_inference_action_log_kwargs: Optional[dict[str, object]] = None
+        self._gui_settings_persist_connected = False
+        self._gui_settings_persist_timer = QTimer(self)
+        self._gui_settings_persist_timer.setSingleShot(True)
+        self._gui_settings_persist_timer.timeout.connect(self._persist_gui_settings_snapshot)
 
         self.status_refresh_timer = QTimer(self)
         self.status_refresh_timer.timeout.connect(self._refresh_runtime_status)
@@ -135,6 +148,11 @@ class TeleopMainWindow(QMainWindow):
 
         try:
             self._stop_preview_api_worker()
+        except Exception:
+            pass
+
+        try:
+            self._stop_preview_recording(reason_label="程序退出")
         except Exception:
             pass
 
@@ -548,12 +566,13 @@ class TeleopMainWindow(QMainWindow):
         self.inference_device_combo.setCurrentIndex(max(0, self.inference_device_combo.findData("cuda")))
         inference_layout.addWidget(self.inference_device_combo, 3, 5)
 
-        inference_layout.addWidget(QLabel("推理频率(Hz):"), 4, 0)
+        inference_layout.addWidget(QLabel("高层动作频率(Hz):"), 4, 0)
         self.inference_hz_spin = QDoubleSpinBox()
         self.inference_hz_spin.setRange(0.2, 30.0)
         self.inference_hz_spin.setDecimals(1)
         self.inference_hz_spin.setSingleStep(0.5)
         self.inference_hz_spin.setValue(10.0)
+        self.inference_hz_spin.setToolTip("控制高层动作输出频率；不等同于完整重规划频率。实际重规划频率约为该值 / replan_every。")
         self.inference_hz_spin.setFixedHeight(emphasis_spin_height)
         inference_layout.addWidget(self.inference_hz_spin, 4, 1)
 
@@ -597,7 +616,15 @@ class TeleopMainWindow(QMainWindow):
         self.lbl_inference_execute_status.setStyleSheet("font-weight: bold; color: #6c757d;")
         inference_layout.addWidget(self.lbl_inference_execute_status, 5, 4, 1, 2)
 
-        self.inference_hint_label = QLabel("说明: 直接调用 Real_IL 的 RealRobotPolicy, UI 负责相机采集、预览发布、推理调度和动作下发。")
+        self.chk_collect_inference_logs = QCheckBox("记录执行段动作日志")
+        self.chk_collect_inference_logs.setChecked(bool(self.gui_settings.collect_inference_action_logs))
+        self.chk_collect_inference_logs.setToolTip("勾选后，仅在点击“开始执行任务”期间保存高层动作日志。")
+        self.chk_collect_inference_logs.toggled.connect(self._on_collect_inference_logs_toggled)
+        inference_layout.addWidget(self.chk_collect_inference_logs, 6, 0, 1, 3)
+
+        self.inference_hint_label = QLabel(
+            "说明: 直接调用 Real_IL 的 RealRobotPolicy。这里的频率表示高层动作输出频率，不等同于完整重规划频率；GUI 负责相机采集、预览发布、推理调度和动作下发。勾选上方开关后，点击开始执行任务会把执行期间的高层动作保存到 data/inference_action_logs。"
+        )
         self.inference_hint_label.setWordWrap(True)
         self.inference_hint_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.inference_hint_label.setStyleSheet("color: #555; font-size: 12px;")
@@ -636,6 +663,8 @@ class TeleopMainWindow(QMainWindow):
         self.ee_combo.currentIndexChanged.connect(self._sync_ros_worker_inference_control_config)
         self.ur_type_input.textChanged.connect(self._refresh_runtime_status)
         self.refresh_inference_options()
+        self._restore_persisted_gui_state()
+        self._connect_gui_settings_persistence()
         self._update_input_hint()
         self._update_input_mode_widgets()
 
@@ -1344,12 +1373,13 @@ class TeleopMainWindow(QMainWindow):
         self.inference_device_combo.setCurrentIndex(max(0, self.inference_device_combo.findData("cuda")))
         inference_layout.addWidget(self.inference_device_combo, 3, 5)
 
-        inference_layout.addWidget(QLabel("推理频率(Hz):"), 4, 0)
+        inference_layout.addWidget(QLabel("高层动作频率(Hz):"), 4, 0)
         self.inference_hz_spin = QDoubleSpinBox()
         self.inference_hz_spin.setRange(0.2, 30.0)
         self.inference_hz_spin.setDecimals(1)
         self.inference_hz_spin.setSingleStep(0.5)
         self.inference_hz_spin.setValue(10.0)
+        self.inference_hz_spin.setToolTip("控制高层动作输出频率；不等同于完整重规划频率。实际重规划频率约为该值 / replan_every。")
         inference_layout.addWidget(self.inference_hz_spin, 4, 1)
 
         self.btn_inference = QPushButton("启动推理")
@@ -1395,7 +1425,15 @@ class TeleopMainWindow(QMainWindow):
         self.btn_inference_estop.clicked.connect(self.emergency_stop_inference_execution)
         inference_layout.addWidget(self.btn_inference_estop, 5, 2)
 
-        self.inference_hint_label = QLabel("说明: 直接调用 Real_IL 的 RealRobotPolicy，GUI 负责预览、推理调度和动作下发。")
+        self.chk_collect_inference_logs = QCheckBox("记录执行段动作日志")
+        self.chk_collect_inference_logs.setChecked(bool(self.gui_settings.collect_inference_action_logs))
+        self.chk_collect_inference_logs.setToolTip("勾选后，仅在点击“开始执行任务”期间保存高层动作日志。")
+        self.chk_collect_inference_logs.toggled.connect(self._on_collect_inference_logs_toggled)
+        inference_layout.addWidget(self.chk_collect_inference_logs, 6, 0, 1, 3)
+
+        self.inference_hint_label = QLabel(
+            "说明: 直接调用 Real_IL 的 RealRobotPolicy。这里的频率表示高层动作输出频率，不等同于完整重规划频率；GUI 负责预览、推理调度和动作下发。勾选上方开关后，点击开始执行任务会把执行期间的高层动作保存到 data/inference_action_logs。"
+        )
         self.inference_hint_label.setWordWrap(True)
         self.inference_hint_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.inference_hint_label.setStyleSheet("color: #5b6777; font-size: 12px;")
@@ -1515,12 +1553,13 @@ class TeleopMainWindow(QMainWindow):
         self.inference_device_combo.setCurrentIndex(max(0, self.inference_device_combo.findData("cuda")))
         inference_layout.addWidget(self.inference_device_combo, 3, 5)
 
-        inference_layout.addWidget(QLabel("推理频率(Hz):"), 4, 0)
+        inference_layout.addWidget(QLabel("高层动作频率(Hz):"), 4, 0)
         self.inference_hz_spin = QDoubleSpinBox()
         self.inference_hz_spin.setRange(0.2, 30.0)
         self.inference_hz_spin.setDecimals(1)
         self.inference_hz_spin.setSingleStep(0.5)
         self.inference_hz_spin.setValue(10.0)
+        self.inference_hz_spin.setToolTip("控制高层动作输出频率；不等同于完整重规划频率。实际重规划频率约为该值 / replan_every。")
         inference_layout.addWidget(self.inference_hz_spin, 4, 1)
 
         self.btn_inference = QPushButton("启动推理")
@@ -1566,7 +1605,15 @@ class TeleopMainWindow(QMainWindow):
         self.btn_inference_estop.clicked.connect(self.emergency_stop_inference_execution)
         inference_layout.addWidget(self.btn_inference_estop, 5, 2)
 
-        self.inference_hint_label = QLabel("说明: 直接调用 Real_IL 的 RealRobotPolicy，GUI 负责预览、推理调度和动作下发。")
+        self.chk_collect_inference_logs = QCheckBox("记录执行段动作日志")
+        self.chk_collect_inference_logs.setChecked(bool(self.gui_settings.collect_inference_action_logs))
+        self.chk_collect_inference_logs.setToolTip("勾选后，仅在点击“开始执行任务”期间保存高层动作日志。")
+        self.chk_collect_inference_logs.toggled.connect(self._on_collect_inference_logs_toggled)
+        inference_layout.addWidget(self.chk_collect_inference_logs, 6, 0, 1, 3)
+
+        self.inference_hint_label = QLabel(
+            "说明: 直接调用 Real_IL 的 RealRobotPolicy。这里的频率表示高层动作输出频率，不等同于完整重规划频率；GUI 负责预览、推理调度和动作下发。勾选上方开关后，点击开始执行任务会把执行期间的高层动作保存到 data/inference_action_logs。"
+        )
         self.inference_hint_label.setWordWrap(True)
         self.inference_hint_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.inference_hint_label.setStyleSheet("color: #555; font-size: 12px;")
@@ -1632,7 +1679,7 @@ class TeleopMainWindow(QMainWindow):
         if hasattr(self, "vision_panel") and self.vision_panel is not None:
             self.vision_panel.update_record_stats(frames, time_str, realtime_fps)
         if self.preview_window is not None:
-            self.preview_window.update_record_stats(frames, time_str, realtime_fps)
+            self.preview_window.update_dataset_record_stats(frames, time_str, realtime_fps)
 
     def _persisted_home_joint_positions(self) -> List[float]:
         profile_name = self._selected_robot_profile()
@@ -1974,68 +2021,7 @@ class TeleopMainWindow(QMainWindow):
             self.log(f"已刷新 SDK 相机列表，检测到 {len(options)} 台设备。")
 
     def _persist_camera_preferences(self) -> None:
-        mediapipe_option = self._selected_camera_option(
-            self.mediapipe_camera_combo,
-            self._default_mediapipe_camera_source(),
-            self._default_mediapipe_camera_model(),
-        )
-        global_option = self._selected_camera_option(
-            self.global_camera_source_combo,
-            self.gui_settings.default_global_camera_source,
-            self.gui_settings.default_collector_global_camera_model,
-        )
-        wrist_option = self._selected_camera_option(
-            self.wrist_camera_source_combo,
-            self.gui_settings.default_wrist_camera_source,
-            self.gui_settings.default_collector_wrist_camera_model,
-        )
-        inference_global_option = self._selected_camera_option(
-            self.inference_global_camera_combo,
-            self.gui_settings.default_inference_global_camera_source,
-            self.gui_settings.default_inference_global_camera_model,
-        )
-        inference_wrist_option = self._selected_camera_option(
-            self.inference_wrist_camera_combo,
-            self.gui_settings.default_inference_wrist_camera_source,
-            self.gui_settings.default_inference_wrist_camera_model,
-        )
-
-        mediapipe_serial = str(mediapipe_option.get("serial", "")).strip()
-        global_serial = str(global_option.get("serial", "")).strip()
-        wrist_serial = str(wrist_option.get("serial", "")).strip()
-        inference_global_serial = str(inference_global_option.get("serial", "")).strip()
-        inference_wrist_serial = str(inference_wrist_option.get("serial", "")).strip()
-
-        global_source = str(global_option.get("source", "")).strip().lower() or self.gui_settings.default_global_camera_source
-        wrist_source = str(wrist_option.get("source", "")).strip().lower() or self.gui_settings.default_wrist_camera_source
-        inference_global_source = (
-            str(inference_global_option.get("source", "")).strip().lower()
-            or self.gui_settings.default_inference_global_camera_source
-        )
-        inference_wrist_source = (
-            str(inference_wrist_option.get("source", "")).strip().lower()
-            or self.gui_settings.default_inference_wrist_camera_source
-        )
-
-        updates = {
-            "default_mediapipe_camera": str(mediapipe_option.get("model", "")).strip().lower() or self._default_mediapipe_camera_model(),
-            "default_mediapipe_camera_serial_number": mediapipe_serial,
-            "default_mediapipe_input_topic": self._selected_mediapipe_topic(),
-            "default_global_camera_source": global_source,
-            "default_wrist_camera_source": wrist_source,
-            "default_collector_global_camera_model": str(global_option.get("model", "")).strip().lower() or self.gui_settings.default_collector_global_camera_model,
-            "default_collector_wrist_camera_model": str(wrist_option.get("model", "")).strip().lower() or self.gui_settings.default_collector_wrist_camera_model,
-            "default_collector_global_camera_serial_number": global_serial,
-            "default_collector_wrist_camera_serial_number": wrist_serial,
-            "default_inference_global_camera_source": inference_global_source,
-            "default_inference_global_camera_model": str(inference_global_option.get("model", "")).strip().lower()
-            or self.gui_settings.default_inference_global_camera_model,
-            "default_inference_global_camera_serial_number": inference_global_serial,
-            "default_inference_wrist_camera_source": inference_wrist_source,
-            "default_inference_wrist_camera_model": str(inference_wrist_option.get("model", "")).strip().lower()
-            or self.gui_settings.default_inference_wrist_camera_model,
-            "default_inference_wrist_camera_serial_number": inference_wrist_serial,
-        }
+        updates = self._camera_preference_updates()
         try:
             save_gui_settings_overrides(__file__, updates)
             self.gui_settings = load_gui_settings(__file__)
@@ -2208,6 +2194,37 @@ class TeleopMainWindow(QMainWindow):
         output_dir = Path(self._selected_record_output_dir()).expanduser()
         filename = self._selected_record_filename()
         return str((output_dir / filename).resolve())
+
+    @staticmethod
+    def _normalize_preview_record_target(target: str) -> str:
+        normalized = str(target).strip().lower()
+        if normalized in {"global", "wrist", "both"}:
+            return normalized
+        return "both"
+
+    @staticmethod
+    def _normalize_preview_record_frame_mode(frame_mode: str) -> str:
+        normalized = str(frame_mode).strip().lower()
+        if normalized in {"source", "square"}:
+            return normalized
+        return "source"
+
+    def _preview_recordings_root(self) -> Path:
+        return (MODELS_ROOT.parent / "data" / "preview_recordings").resolve()
+
+    def _create_preview_recording_session_dir(self) -> Path:
+        root = self._preview_recordings_root()
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        session_dir = root / timestamp
+        suffix = 1
+        while session_dir.exists():
+            suffix += 1
+            session_dir = root / f"{timestamp}_{suffix:02d}"
+        return session_dir
+
+    def _preview_recording_running(self) -> bool:
+        worker = self._preview_recording_worker
+        return bool(worker is not None and worker.isRunning())
 
     def _default_mediapipe_topics(self) -> List[str]:
         profile = self._selected_mediapipe_camera_profile()
@@ -2676,6 +2693,7 @@ class TeleopMainWindow(QMainWindow):
         if not self.app_service.has_ros_worker():
             return False
         if self._inference_execution_running():
+            self._clear_pending_inference_execution_start()
             self.app_service.disable_inference_execution()
             self.orchestrator.notify_inference_execution(False)
             self._set_inference_execute_button_running(False)
@@ -2717,6 +2735,59 @@ class TeleopMainWindow(QMainWindow):
             return True
         return self.btn_execute_inference.isChecked()
 
+    def _clear_pending_inference_execution_start(self) -> None:
+        self._pending_inference_execution_start = False
+        self._pending_inference_action_log_kwargs = None
+
+    def _build_inference_action_log_kwargs(self) -> Optional[dict[str, object]]:
+        if not self._should_collect_inference_action_logs():
+            return None
+        model_dir = self._selected_inference_model_dir()
+        task_name = self._selected_inference_task_name()
+        embedding_path = self.inference_embedding_input.text().strip()
+        global_source, wrist_source = self._selected_inference_camera_sources()
+        return {
+            "checkpoint_dir": str(Path(model_dir).expanduser().resolve()) if model_dir else "",
+            "task_name": task_name,
+            "task_embedding_path": str(Path(embedding_path).expanduser().resolve()) if embedding_path else "",
+            "loop_hz": float(self.inference_hz_spin.value()),
+            "global_camera_source": global_source,
+            "wrist_camera_source": wrist_source,
+            "device": str(self._selected_inference_device() or "auto"),
+            "control_hz": float(self._current_ros_worker_config().inference_control_hz),
+        }
+
+    def _queue_inference_execution_start(self) -> None:
+        self._pending_inference_execution_start = True
+        self._pending_inference_action_log_kwargs = self._build_inference_action_log_kwargs()
+        self._set_inference_execute_button_running(True)
+        self._set_inference_execute_status("等待块起点", "#e67700")
+        self.log("已请求开始执行，将在下一个动作块第 1 步时使能控制。")
+        self._refresh_runtime_status()
+
+    def _activate_pending_inference_execution(self) -> None:
+        if not self._pending_inference_execution_start:
+            return
+
+        log_kwargs = self._pending_inference_action_log_kwargs
+        self._clear_pending_inference_execution_start()
+        self.app_service.enable_inference_execution(
+            ros_worker_config=self._current_ros_worker_config(),
+            ros_worker_callbacks=self._build_ros_worker_callbacks(),
+        )
+        if log_kwargs is not None:
+            try:
+                csv_path = self.app_service.start_inference_action_logging(**log_kwargs)
+                self.log(f"本次执行段高层推理动作将记录到: {csv_path}")
+            except Exception as exc:
+                self.log(f"创建执行段高层推理动作日志失败: {exc}")
+        self.orchestrator.notify_inference_execution(True)
+        self._set_inference_execute_button_running(True)
+        self._set_inference_execute_status("执行中", "#2b8a3e")
+        self.btn_inference_estop.setEnabled(True)
+        self.log("已在新的动作块起点开始执行推理任务，动作将直接发送到控制器。")
+        self._refresh_runtime_status()
+
     def _ros_worker_required(self) -> bool:
         preview_running = bool(self.preview_window is not None and self.preview_window.isVisible())
         return self.app_service.ros_worker_required(
@@ -2740,6 +2811,8 @@ class TeleopMainWindow(QMainWindow):
         self.preview_api_worker = HttpPreviewWorker(self.COLLECTOR_PREVIEW_API_BASE_URL, fps=30.0)
         self.preview_api_worker.availability_signal.connect(self._on_preview_api_availability_changed)
         self.preview_api_worker.log_signal.connect(self.log)
+        self.preview_api_worker.global_image_signal.connect(self._on_collector_preview_global_frame)
+        self.preview_api_worker.wrist_image_signal.connect(self._on_collector_preview_wrist_frame)
         if self.vision_panel is not None:
             self.preview_api_worker.global_image_signal.connect(self.vision_panel.update_global_image)
             self.preview_api_worker.wrist_image_signal.connect(self.vision_panel.update_wrist_image)
@@ -2772,6 +2845,98 @@ class TeleopMainWindow(QMainWindow):
             if not available:
                 self.preview_window.clear_images()
 
+    def _push_preview_frame_to_recording(self, camera_name: str, frame) -> None:
+        worker = self._preview_recording_worker
+        if worker is None or not worker.isRunning() or frame is None:
+            return
+        worker.update_frame(camera_name, frame)
+
+    @Slot(object)
+    def _on_collector_preview_global_frame(self, frame) -> None:
+        if not self._collector_preview_api_should_run():
+            return
+        self._push_preview_frame_to_recording("global", frame)
+
+    @Slot(object)
+    def _on_collector_preview_wrist_frame(self, frame) -> None:
+        if not self._collector_preview_api_should_run():
+            return
+        self._push_preview_frame_to_recording("wrist", frame)
+
+    @Slot(str)
+    def _on_preview_recording_status(self, text: str) -> None:
+        if self.preview_window is not None:
+            self.preview_window.update_preview_recording_status(text)
+
+    @Slot(str)
+    def _on_preview_recording_error(self, message: str) -> None:
+        self.log(message)
+        if self.preview_window is not None:
+            self.preview_window.update_preview_recording_status(f"预览录屏: 失败 | {message}")
+            self.preview_window.set_preview_recording_state(False, output_dir=str(self._preview_recording_session_dir or ""))
+        QMessageBox.warning(self, "预览录屏失败", message)
+
+    @Slot(str)
+    def _on_preview_recording_stopped(self, output_dir: str) -> None:
+        normalized_dir = str(output_dir).strip()
+        worker = self.sender()
+        if worker is not None and worker is not self._preview_recording_worker:
+            return
+        self._preview_recording_worker = None
+        self._preview_recording_session_dir = None
+        if self.preview_window is not None:
+            self.preview_window.set_preview_recording_state(False, output_dir=normalized_dir)
+            if normalized_dir:
+                self.preview_window.update_preview_recording_status(f"预览录屏: 已停止 | 目录: {normalized_dir}")
+            else:
+                self.preview_window.update_preview_recording_status("预览录屏: 已停止")
+        if normalized_dir:
+            self.log(f"预览录屏已停止，文件保存在: {normalized_dir}")
+
+    def _start_preview_recording(self, target: str, frame_mode: str) -> None:
+        if self._preview_recording_worker is not None:
+            return
+        normalized_target = self._normalize_preview_record_target(target)
+        normalized_frame_mode = self._normalize_preview_record_frame_mode(frame_mode)
+        session_dir = self._create_preview_recording_session_dir()
+        worker = PreviewRecordingWorker(
+            session_dir,
+            target=normalized_target,
+            frame_mode=normalized_frame_mode,
+            fps=30.0,
+        )
+        worker.status_signal.connect(self._on_preview_recording_status)
+        worker.error_signal.connect(self._on_preview_recording_error)
+        worker.stopped_signal.connect(self._on_preview_recording_stopped)
+        self._preview_recording_worker = worker
+        self._preview_recording_session_dir = session_dir
+        if self.preview_window is not None:
+            self.preview_window.set_preview_recording_state(True, output_dir=str(session_dir))
+            self.preview_window.update_preview_recording_status("预览录屏: 录制中 | 等待画面...")
+        self.log(f"已开始预览录屏，目标={normalized_target}，尺寸={normalized_frame_mode}，输出目录: {session_dir}")
+        worker.start()
+
+    def _stop_preview_recording(self, *, reason_label: str = "手动停止") -> None:
+        worker = self._preview_recording_worker
+        if worker is None:
+            if self.preview_window is not None:
+                self.preview_window.set_preview_recording_state(False)
+            return
+        if self.preview_window is not None:
+            self.preview_window.set_preview_recording_state(False, output_dir=str(self._preview_recording_session_dir or ""))
+            self.preview_window.update_preview_recording_status(f"预览录屏: 停止中 | 原因: {reason_label}")
+        worker.stop()
+
+    @Slot(bool, str)
+    def _on_preview_record_toggle_requested(self, checked: bool, target: str) -> None:
+        if checked:
+            frame_mode = "source"
+            if self.preview_window is not None:
+                frame_mode = self.preview_window.selected_preview_record_frame_mode()
+            self._start_preview_recording(target, frame_mode)
+            return
+        self._stop_preview_recording(reason_label="用户停止")
+
     def _cache_inference_preview_frames(self, global_bgr, wrist_bgr) -> None:
         self._latest_inference_global_bgr = None if global_bgr is None else np.ascontiguousarray(global_bgr).copy()
         self._latest_inference_wrist_bgr = None if wrist_bgr is None else np.ascontiguousarray(wrist_bgr).copy()
@@ -2799,6 +2964,9 @@ class TeleopMainWindow(QMainWindow):
         self.log("已启动 ROS 监听器，用于给推理读取机器人状态。")
 
     def _sync_preview_pipeline(self) -> None:
+        inference_preview_active = self._inference_preview_should_render()
+        self.inference_service.set_preview_streaming(inference_preview_active)
+
         if self._collector_preview_api_should_run():
             self._start_preview_api_worker()
             source = "采集节点 API" if self._preview_api_active else "采集节点 API (连接中)"
@@ -2815,7 +2983,7 @@ class TeleopMainWindow(QMainWindow):
             return
 
         self._stop_preview_api_worker()
-        if self._inference_preview_should_render():
+        if inference_preview_active:
             if self.toolbar_preview_label is not None:
                 self.toolbar_preview_label.setText("监视器: 推理直连")
             if self.vision_panel is not None:
@@ -2840,6 +3008,255 @@ class TeleopMainWindow(QMainWindow):
 
     def _current_robot_state_for_inference(self) -> Optional[np.ndarray]:
         return self.app_service.current_robot_state_vector()
+
+    def _should_collect_inference_action_logs(self) -> bool:
+        checkbox = getattr(self, "chk_collect_inference_logs", None)
+        if checkbox is None:
+            return bool(self.gui_settings.collect_inference_action_logs)
+        return bool(checkbox.isChecked())
+
+    @staticmethod
+    def _normalize_settings_path(value: str) -> str:
+        text = str(value).strip()
+        if not text:
+            return ""
+        try:
+            return str(Path(text).expanduser().resolve())
+        except Exception:
+            return text
+
+    def _restore_persisted_gui_state(self) -> None:
+        self._suspend_gui_settings_persist = True
+        try:
+            model_dir = self._normalize_settings_path(self.gui_settings.default_inference_model_dir)
+            if model_dir:
+                self.inference_model_dir_input.setText(model_dir)
+                self._sync_inference_model_dir_tooltip()
+
+            device_name = str(self.gui_settings.default_inference_device).strip().lower() or "cuda"
+            device_index = self.inference_device_combo.findData(device_name)
+            if device_index < 0:
+                device_index = self.inference_device_combo.findData("cuda")
+            if device_index >= 0:
+                self.inference_device_combo.setCurrentIndex(device_index)
+
+            hz_value = float(self.gui_settings.default_inference_hz)
+            hz_value = min(max(hz_value, self.inference_hz_spin.minimum()), self.inference_hz_spin.maximum())
+            self.inference_hz_spin.setValue(hz_value)
+
+            preferred_env = str(self.gui_settings.default_inference_env).strip()
+            if preferred_env:
+                env_index = self.inference_env_combo.findData(preferred_env)
+                if env_index < 0:
+                    env_index = self.inference_env_combo.findText(preferred_env)
+                if env_index >= 0:
+                    self.inference_env_combo.setCurrentIndex(env_index)
+
+            preferred_embedding = self._normalize_settings_path(self.gui_settings.default_inference_embedding_path)
+            if preferred_embedding:
+                self.inference_embedding_input.setText(preferred_embedding)
+                self.inference_embedding_input.setToolTip(preferred_embedding)
+                self.inference_embedding_input.setCursorPosition(0)
+                embedding_path = Path(preferred_embedding).expanduser()
+                if embedding_path.is_file():
+                    self._populate_inference_tasks_from_embedding(embedding_path.resolve())
+
+            preferred_task = str(self.gui_settings.default_inference_task).strip()
+            if preferred_task:
+                task_index = self.inference_task_combo.findData(preferred_task)
+                if task_index < 0:
+                    task_index = self.inference_task_combo.findText(preferred_task)
+                if task_index >= 0:
+                    self.inference_task_combo.setCurrentIndex(task_index)
+        finally:
+            self._suspend_gui_settings_persist = False
+
+    def _connect_gui_settings_persistence(self) -> None:
+        if self._gui_settings_persist_connected:
+            return
+
+        self.mode_combo.currentIndexChanged.connect(self._schedule_gui_settings_persist)
+        self.joy_profile_combo.currentIndexChanged.connect(self._schedule_gui_settings_persist)
+        self.ur_type_input.textChanged.connect(self._schedule_gui_settings_persist)
+        self.mediapipe_camera_combo.currentIndexChanged.connect(self._schedule_gui_settings_persist)
+        self.mediapipe_topic_combo.currentTextChanged.connect(self._schedule_gui_settings_persist)
+        self.ip_input.textChanged.connect(self._schedule_gui_settings_persist)
+        self.ee_combo.currentIndexChanged.connect(self._schedule_gui_settings_persist)
+        self.camera_driver_combo.currentIndexChanged.connect(self._schedule_gui_settings_persist)
+        self.record_dir_input.textChanged.connect(self._schedule_gui_settings_persist)
+        self.record_name_input.textChanged.connect(self._schedule_gui_settings_persist)
+        self.global_camera_source_combo.currentIndexChanged.connect(self._schedule_gui_settings_persist)
+        self.wrist_camera_source_combo.currentIndexChanged.connect(self._schedule_gui_settings_persist)
+        self.inference_model_dir_input.textChanged.connect(self._schedule_gui_settings_persist)
+        self.inference_env_combo.currentIndexChanged.connect(self._schedule_gui_settings_persist)
+        self.inference_task_combo.currentIndexChanged.connect(self._schedule_gui_settings_persist)
+        self.inference_embedding_input.textChanged.connect(self._schedule_gui_settings_persist)
+        self.inference_global_camera_combo.currentIndexChanged.connect(self._schedule_gui_settings_persist)
+        self.inference_wrist_camera_combo.currentIndexChanged.connect(self._schedule_gui_settings_persist)
+        self.inference_device_combo.currentIndexChanged.connect(self._schedule_gui_settings_persist)
+        self.inference_hz_spin.valueChanged.connect(self._schedule_gui_settings_persist)
+        self.chk_collect_inference_logs.toggled.connect(self._schedule_gui_settings_persist)
+        self._gui_settings_persist_connected = True
+
+    def _camera_preference_updates(self) -> dict[str, object]:
+        mediapipe_option = self._selected_camera_option(
+            self.mediapipe_camera_combo,
+            self._default_mediapipe_camera_source(),
+            self._default_mediapipe_camera_model(),
+        )
+        global_option = self._selected_camera_option(
+            self.global_camera_source_combo,
+            self.gui_settings.default_global_camera_source,
+            self.gui_settings.default_collector_global_camera_model,
+        )
+        wrist_option = self._selected_camera_option(
+            self.wrist_camera_source_combo,
+            self.gui_settings.default_wrist_camera_source,
+            self.gui_settings.default_collector_wrist_camera_model,
+        )
+        inference_global_option = self._selected_camera_option(
+            self.inference_global_camera_combo,
+            self.gui_settings.default_inference_global_camera_source,
+            self.gui_settings.default_inference_global_camera_model,
+        )
+        inference_wrist_option = self._selected_camera_option(
+            self.inference_wrist_camera_combo,
+            self.gui_settings.default_inference_wrist_camera_source,
+            self.gui_settings.default_inference_wrist_camera_model,
+        )
+
+        mediapipe_serial = str(mediapipe_option.get("serial", "")).strip()
+        global_serial = str(global_option.get("serial", "")).strip()
+        wrist_serial = str(wrist_option.get("serial", "")).strip()
+        inference_global_serial = str(inference_global_option.get("serial", "")).strip()
+        inference_wrist_serial = str(inference_wrist_option.get("serial", "")).strip()
+
+        global_source = str(global_option.get("source", "")).strip().lower() or self.gui_settings.default_global_camera_source
+        wrist_source = str(wrist_option.get("source", "")).strip().lower() or self.gui_settings.default_wrist_camera_source
+        inference_global_source = (
+            str(inference_global_option.get("source", "")).strip().lower()
+            or self.gui_settings.default_inference_global_camera_source
+        )
+        inference_wrist_source = (
+            str(inference_wrist_option.get("source", "")).strip().lower()
+            or self.gui_settings.default_inference_wrist_camera_source
+        )
+
+        return {
+            "default_mediapipe_camera": str(mediapipe_option.get("model", "")).strip().lower() or self._default_mediapipe_camera_model(),
+            "default_mediapipe_camera_serial_number": mediapipe_serial,
+            "default_mediapipe_input_topic": self._selected_mediapipe_topic(),
+            "default_global_camera_source": global_source,
+            "default_wrist_camera_source": wrist_source,
+            "default_collector_global_camera_model": str(global_option.get("model", "")).strip().lower() or self.gui_settings.default_collector_global_camera_model,
+            "default_collector_wrist_camera_model": str(wrist_option.get("model", "")).strip().lower() or self.gui_settings.default_collector_wrist_camera_model,
+            "default_collector_global_camera_serial_number": global_serial,
+            "default_collector_wrist_camera_serial_number": wrist_serial,
+            "default_inference_global_camera_source": inference_global_source,
+            "default_inference_global_camera_model": str(inference_global_option.get("model", "")).strip().lower()
+            or self.gui_settings.default_inference_global_camera_model,
+            "default_inference_global_camera_serial_number": inference_global_serial,
+            "default_inference_wrist_camera_source": inference_wrist_source,
+            "default_inference_wrist_camera_model": str(inference_wrist_option.get("model", "")).strip().lower()
+            or self.gui_settings.default_inference_wrist_camera_model,
+            "default_inference_wrist_camera_serial_number": inference_wrist_serial,
+        }
+
+    def _collect_gui_settings_overrides(self) -> dict[str, object]:
+        updates: dict[str, object] = {
+            "default_robot_ip": self.ip_input.text().strip() or self.gui_settings.default_robot_ip,
+            "default_input_type": self._selected_input_type(),
+            "default_joy_profile": self._selected_joy_profile(),
+            "ur_type": self._selected_ur_type(),
+            "default_gripper_type": self._selected_gripper_type(),
+            "default_camera_driver": self._selected_camera_driver(),
+            "default_hdf5_output_dir": self._normalize_settings_path(self._selected_record_output_dir()),
+            "default_hdf5_filename": self._selected_record_filename(),
+            "default_inference_model_dir": self._normalize_settings_path(self._selected_inference_model_dir()),
+            "default_inference_env": self._selected_inference_env(),
+            "default_inference_task": self._selected_inference_task_name(),
+            "default_inference_embedding_path": self._normalize_settings_path(self.inference_embedding_input.text().strip()),
+            "default_inference_device": str(self._selected_inference_device() or "auto"),
+            "default_inference_hz": float(self.inference_hz_spin.value()),
+            "collect_inference_action_logs": bool(self._should_collect_inference_action_logs()),
+        }
+        updates.update(self._camera_preference_updates())
+        return updates
+
+    def _schedule_gui_settings_persist(self, *_args) -> None:
+        if self._suspend_gui_settings_persist:
+            return
+        self._gui_settings_persist_timer.start(350)
+
+    def _persist_gui_settings_snapshot(self, *, log_errors: bool = True) -> Optional[Path]:
+        if self._suspend_gui_settings_persist:
+            return None
+        try:
+            return save_gui_settings_overrides(__file__, self._collect_gui_settings_overrides())
+        except Exception as exc:
+            if log_errors:
+                self.log(f"保存 GUI 持久化配置失败: {exc}")
+            return None
+
+    def _prompt_inference_action_log_outcome(self, csv_path: Path, *, reason_label: str) -> str:
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Question)
+        dialog.setWindowTitle("记录任务结果")
+        dialog.setText("请标注这次执行任务是否成功。")
+        dialog.setInformativeText(
+            f"日志已保存到:\n{csv_path}\n\n结束原因: {reason_label}\n\n点击【跳过并删除】会删除当前这次记录。"
+        )
+        dialog.setWindowFlag(Qt.WindowCloseButtonHint, False)
+        success_button = dialog.addButton("成功", QMessageBox.AcceptRole)
+        failure_button = dialog.addButton("失败", QMessageBox.DestructiveRole)
+        skip_button = dialog.addButton("跳过并删除", QMessageBox.RejectRole)
+        dialog.exec()
+
+        clicked = dialog.clickedButton()
+        if clicked is success_button:
+            return "success"
+        if clicked is failure_button:
+            return "failure"
+        if clicked is skip_button:
+            return "skip"
+        return "failure"
+
+    def _finalize_inference_action_log(self, *, reason_label: str, stop_reason: str) -> Optional[Path]:
+        csv_path = self.app_service.stop_inference_action_logging()
+        if csv_path is None:
+            return None
+
+        resolved_csv = Path(csv_path).expanduser().resolve()
+        outcome = self._prompt_inference_action_log_outcome(resolved_csv, reason_label=reason_label)
+        if outcome == "skip":
+            deleted_dir = self.app_service.discard_inference_action_log(resolved_csv)
+            if deleted_dir is not None:
+                self.log(f"已删除高层推理动作日志({reason_label}): {deleted_dir}")
+            else:
+                self.log(f"跳过标注后删除高层推理动作日志失败: {resolved_csv}")
+            return None
+
+        metadata_path = self.app_service.annotate_inference_action_log_result(
+            resolved_csv,
+            outcome=outcome,
+            stop_reason=stop_reason,
+        )
+        outcome_text = "成功" if outcome == "success" else "失败"
+        if metadata_path is not None:
+            self.log(f"已保存高层推理动作日志({reason_label})，结果标注为【{outcome_text}】: {metadata_path}")
+        else:
+            self.log(f"已保存高层推理动作日志({reason_label})，结果标注为【{outcome_text}】: {resolved_csv}")
+        return resolved_csv
+
+    @Slot(bool)
+    def _on_collect_inference_logs_toggled(self, checked: bool) -> None:
+        save_gui_settings_overrides(__file__, {"collect_inference_action_logs": bool(checked)})
+        self.gui_settings = load_gui_settings(__file__)
+        if not checked:
+            self._finalize_inference_action_log(
+                reason_label="关闭记录开关",
+                stop_reason="toggle_record_off",
+            )
 
     def _set_status_label(self, label: QLabel, text: str, color: str) -> None:
         label.setText(text)
@@ -3463,19 +3880,22 @@ class TeleopMainWindow(QMainWindow):
                 self._set_inference_execute_button_running(False)
                 return
 
-            self.app_service.enable_inference_execution(
-                ros_worker_config=self._current_ros_worker_config(),
-                ros_worker_callbacks=self._build_ros_worker_callbacks(),
+            self.app_service.ensure_ros_worker(
+                self._current_ros_worker_config(),
+                self._build_ros_worker_callbacks(),
             )
-            self.orchestrator.notify_inference_execution(True)
-            self._set_inference_execute_button_running(True)
-            self._set_inference_execute_status("执行中", "#2b8a3e")
-            self.btn_inference_estop.setEnabled(True)
-            self.log("已开始执行推理任务，动作将直接发送到控制器。")
-            self._refresh_runtime_status()
+            self._queue_inference_execution_start()
             return
 
+        was_pending_start = self._pending_inference_execution_start
+        self._clear_pending_inference_execution_start()
         self.app_service.disable_inference_execution()
+        self._finalize_inference_action_log(
+            reason_label="停止执行",
+            stop_reason="stop_execution",
+        )
+        if was_pending_start and not self.app_service.inference_execution_enabled():
+            self.log("已取消等待开始执行。")
         self.orchestrator.notify_inference_execution(False)
         self._set_inference_execute_button_running(False)
         self._set_inference_execute_status("未使能", "#6c757d")
@@ -3483,7 +3903,12 @@ class TeleopMainWindow(QMainWindow):
         self._refresh_runtime_status()
 
     def emergency_stop_inference_execution(self) -> None:
+        self._clear_pending_inference_execution_start()
         self.app_service.emergency_stop_inference_execution()
+        self._finalize_inference_action_log(
+            reason_label="急停",
+            stop_reason="estop",
+        )
         self.orchestrator.notify_estop(True)
         self._set_inference_execute_button_running(False)
         self._set_inference_execute_status("已急停", "#c92a2a")
@@ -3491,7 +3916,12 @@ class TeleopMainWindow(QMainWindow):
         self._refresh_runtime_status()
 
     def stop_inference(self) -> None:
+        self._clear_pending_inference_execution_start()
         if self.inference_worker is None:
+            self._finalize_inference_action_log(
+                reason_label="未启动但清理",
+                stop_reason="cleanup_without_worker",
+            )
             self._set_inference_button_running(False)
             self._set_inference_status("未启动", "#6c757d")
             self._set_inference_execute_button_running(False)
@@ -3506,6 +3936,11 @@ class TeleopMainWindow(QMainWindow):
         self.orchestrator.clear_estop()
         if not self.inference_service.stop_inference(timeout_ms=4000):
             self.log("推理线程未在 4s 内退出，继续等待资源回收。")
+        else:
+            self._finalize_inference_action_log(
+                reason_label="手动停止",
+                stop_reason="manual_stop_inference",
+            )
         self._clear_inference_preview_frames()
         self._set_inference_button_running(False)
         self._set_inference_status("未启动", "#6c757d")
@@ -3519,13 +3954,42 @@ class TeleopMainWindow(QMainWindow):
 
     @Slot(object)
     def update_inference_action(self, action) -> None:
-        action_array = np.asarray(action, dtype=np.float32).reshape(-1)
+        timing: Optional[dict[str, object]] = None
+        if isinstance(action, InferenceActionSample):
+            timing = {
+                "cycle_compute_ms": float(action.cycle_compute_ms),
+                "camera_fetch_ms": float(action.camera_fetch_ms),
+                "preprocess_ms": float(action.preprocess_ms),
+                "robot_state_ms": float(action.robot_state_ms),
+                "policy_call_ms": float(action.policy_call_ms),
+                "is_replan_step": bool(action.is_replan_step),
+                "plan_step_idx": int(action.plan_step_idx),
+                "replan_every": int(action.replan_every),
+            }
+            action_array = np.asarray(action.action, dtype=np.float32).reshape(-1)
+        else:
+            action_array = np.asarray(action, dtype=np.float32).reshape(-1)
         self.inference_action_output.setPlainText(format_action(action_array))
         self.app_service.update_inference_action_command(action_array)
+        if self._pending_inference_execution_start:
+            should_start_execution = timing is None
+            if timing is not None:
+                should_start_execution = bool(timing.get("is_replan_step", False))
+                if not should_start_execution:
+                    try:
+                        should_start_execution = int(timing.get("plan_step_idx", -1)) <= 0
+                    except Exception:
+                        should_start_execution = False
+            if should_start_execution:
+                self._activate_pending_inference_execution()
+        self.app_service.record_inference_action_sample(action_array, timing=timing)
 
     @Slot(object, object)
     def update_inference_preview(self, global_bgr, wrist_bgr) -> None:
         self._cache_inference_preview_frames(global_bgr, wrist_bgr)
+        if self._inference_preview_should_render():
+            self._push_preview_frame_to_recording("global", global_bgr)
+            self._push_preview_frame_to_recording("wrist", wrist_bgr)
         self._render_inference_preview_frames()
 
     @Slot(str)
@@ -3544,7 +4008,12 @@ class TeleopMainWindow(QMainWindow):
 
     @Slot(str)
     def _on_inference_error(self, message: str) -> None:
+        self._clear_pending_inference_execution_start()
         self.log(f"推理线程出错: {message}")
+        self._finalize_inference_action_log(
+            reason_label="推理报错",
+            stop_reason="inference_error",
+        )
         self.inference_action_output.setPlainText("推理失败，详见下方日志输出。")
         self.app_service.emergency_stop_inference_execution()
         self.orchestrator.notify_estop(True)
@@ -3559,6 +4028,11 @@ class TeleopMainWindow(QMainWindow):
 
     @Slot()
     def _on_inference_finished(self) -> None:
+        self._clear_pending_inference_execution_start()
+        self._finalize_inference_action_log(
+            reason_label="线程结束",
+            stop_reason="worker_finished",
+        )
         self.app_service.disable_inference_execution()
         self.orchestrator.notify_inference_execution(False)
         self.orchestrator.notify_inference_ready(False)
@@ -3672,6 +4146,7 @@ class TeleopMainWindow(QMainWindow):
 
     @Slot(int)
     def _on_preview_window_finished(self, _result: int):
+        self._stop_preview_recording(reason_label="关闭预览窗口")
         if self.preview_window is not None:
             self.preview_window.set_preview_source("已关闭")
             self.preview_window.clear_images()
@@ -3686,9 +4161,11 @@ class TeleopMainWindow(QMainWindow):
         if self.preview_window is None:
             self.preview_window = CameraPreviewWindow(self)
             self.preview_window.finished.connect(self._on_preview_window_finished)
+            self.preview_window.preview_record_toggle_requested.connect(self._on_preview_record_toggle_requested)
             self._preview_window_api_connected = False
         if not self.app_service.is_recording():
-            self.preview_window.reset_record_stats()
+            self.preview_window.reset_dataset_record_stats()
+        self.preview_window.set_preview_recording_state(self._preview_recording_running(), output_dir=str(self._preview_recording_session_dir or ""))
 
         if self.preview_api_worker is not None and not self._preview_window_api_connected:
             self.preview_api_worker.global_image_signal.connect(self.preview_window.update_global_image)
@@ -3709,5 +4186,6 @@ class TeleopMainWindow(QMainWindow):
         viewer.exec()
 
     def closeEvent(self, event):
+        self._persist_gui_settings_snapshot(log_errors=False)
         self._shutdown()
         event.accept()

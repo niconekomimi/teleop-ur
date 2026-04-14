@@ -2,7 +2,7 @@
 
 # PROJECT_ANALYSIS
 
-Last updated: 2026-03-29
+Last updated: 2026-04-09
 
 ## 1. Purpose
 
@@ -47,12 +47,15 @@ Main files:
 - `teleop_control_py/gui/intent_controller.py`
 - `teleop_control_py/gui/runtime_facade.py`
 - `teleop_control_py/gui/ros_worker.py`
+- `teleop_control_py/gui/http_preview_worker.py`
+- `teleop_control_py/gui/preview_recording_worker.py`
 
 Responsibility boundaries:
 
 - `main_window.py`
   - Owns widgets, layout, user actions, and state rendering.
   - No longer assembles raw ROS service / topic details directly.
+  - Also owns preview-source switching, preview-window state, and preview-recording UI orchestration.
 - `GuiAppService`
   - Manages child-process startup and shutdown.
   - Manages `ROS2Worker` lifecycle.
@@ -65,11 +68,18 @@ Responsibility boundaries:
   - Acts as the GUI's ROS bridge.
   - Subscribes to robot state and calls `data_collector` / `commander` services.
   - During inference execution, it owns a local `ControlCoordinator + ServoArmBackend + GripperBackend` chain to send commands.
+- `HttpPreviewWorker`
+  - Polls the collector Preview API.
+  - Converts collector-side `HTTP/JPEG` preview frames back into GUI updates.
+- `PreviewRecordingWorker`
+  - Reuses the currently active preview source.
+  - Writes local `mp4` files independently of HDF5 dataset collection.
 
 Current assessment:
 
 - The main GUI window has become much more UI-oriented.
 - But `ROS2Worker` still owns part of the runtime control responsibility, especially for inference execution.
+- The preview path is still mainly orchestrated at the GUI layer as well: collector API polling, inference direct rendering, and preview recording are all closed there.
 
 ## 3.2 Core Layer
 
@@ -128,6 +138,8 @@ Main files:
 - `teleop_control_py/nodes/robot_commander_node.py`
 - `teleop_control_py/nodes/data_collector_node.py`
 - `teleop_control_py/nodes/joy_driver_node.py`
+- `teleop_control_py/nodes/quest3_webxr_bridge_node.py`
+- `teleop_control_py/data/preview_api.py`
 - `teleop_control_py/device_manager/*`
 - `teleop_control_py/hardware/*`
 
@@ -150,6 +162,9 @@ Responsibilities:
   - Owns physical joystick device access and publishes `/joy`.
 - `quest3_webxr_bridge_node`
   - Owns Quest Browser WebXR controller ingestion and publishes `/quest3/*`.
+- `PreviewApiServer`
+  - Exposes `/preview/global.jpg` and `/preview/wrist.jpg` from collector-side cached frames
+  - Provides a lightweight monitoring interface for the GUI preview window
 - `device_manager`
   - Provides `ServoArmBackend / ControllerGripperBackend / SharedMemoryCameraBackend / InputHandlerBackend`
   - Provides robot profile loading and default-value assembly.
@@ -158,6 +173,7 @@ Current assessment:
 
 - The current system is not a single monolithic node.
 - It is a structure of multiple specialized ROS nodes plus a shared core layer.
+- Collector preview is also not shared-memory direct-to-GUI; it is a collector-side HTTP helper plus GUI polling.
 
 ## 3.4 External Drivers / Dependencies
 
@@ -169,6 +185,7 @@ Main external dependencies:
 - `qbsofthand_control`
 - `pyrealsense2`
 - `depthai`
+- `vuer`
 - `Real_IL` and its inference dependencies
 
 The main control-system launch entry is still:
@@ -304,6 +321,7 @@ Current characteristics:
   - timestamp drift between the two cameras
 - Images are center-cropped and always written as `224 x 224`.
 - `RecorderService` owns demo index incrementing and last-demo discard behavior.
+- the collector can also expose cached preview frames, but that is a monitoring helper path rather than the primary sampling path
 
 Service interfaces:
 
@@ -332,6 +350,57 @@ Current characteristics:
 - Gripper commands are discretized into binary open/close commands inside `ROS2Worker`.
 
 This means inference execution is still a GUI-driven control path, not an independent ROS inference node.
+
+## 4.6 Preview / Preview Recording Flow
+
+```text
+preview window
+-> collector Preview API or direct inference preview
+-> optional PreviewRecordingWorker
+-> local mp4
+```
+
+Current characteristics:
+
+- The source priority is: collector Preview API > direct inference preview > no active image source.
+- The collector-side preview path is: `data_collector_node` timed frame pull -> `PreviewApiServer` exposes `/preview/*.jpg` -> GUI `HttpPreviewWorker` polls and renders.
+- Collector preview targets `30 Hz` by default and uses `HTTP/JPEG`, which is better suited for monitoring than high-quality recording.
+- Inference preview has already been decoupled from the policy loop, using a separate `30 Hz` preview thread pushed on demand.
+- Inference preview is enabled only when the preview window is open, inference is running, and the collector is not owning the preview path.
+- Preview recording sits on top of whichever preview source is currently active and writes to `data/preview_recordings/<timestamp>/*.mp4`.
+- Preview recording is not HDF5 collection and does not drive `data_collector_node` start/stop.
+
+Current assessment:
+
+- Preview cadence is now separate from policy-action cadence instead of being tightly coupled to it.
+- This path is still a GUI-orchestrated monitoring path, not part of the low-level robot control loop.
+
+## 4.7 Quest 3 / WebXR Flow
+
+```text
+Quest Browser
+-> vuer.ai?ws=wss://<pc_wifi_ip>:8012
+-> quest3_webxr_bridge_node
+-> /quest3/*
+-> Quest3InputHandler
+-> teleop_control_node
+-> ControlCoordinator
+```
+
+Current characteristics:
+
+- Quest input is no longer a standalone prototype; it is now a formal `input_type`.
+- `control_system.launch.py` can automatically bring up `quest3_webxr_bridge_node` when `input_type:=quest3` and the bridge switch allows it.
+- A split debug workflow is also supported through `quest3_webxr_bridge.launch.py` plus `teleop_control.launch.py input_type:=quest3`.
+- The bridge uses `Vuer` to provide a secure `https/wss` WebXR entry, and the recommended Quest URL is `https://vuer.ai?ws=wss://<pc_wifi_ip>:8012`.
+- The first visit usually requires one manual certificate acceptance in Quest Browser.
+- `Quest3InputHandler` defaults to `relative pose + clutch + hand_relative orientation`.
+- Quest2ROS-style frame reset is already supported.
+
+Current assessment:
+
+- The Quest input path is now genuinely integrated into the existing teleop architecture.
+- But the Quest-side page is still mostly focused on controller-stream ingestion and does not yet provide a full status UI / haptics / floating-panel experience.
 
 ---
 
@@ -436,7 +505,12 @@ Currently responsible for:
 - teleop rate
 - velocity / acceleration limits
 - joy mapping
+- Quest 3 mapping, clutch, orientation, and frame-reset parameters
 - MediaPipe algorithm parameters
+
+Additional note:
+
+- Default `quest3_webxr_bridge_node` settings such as `advertised_host / vuer_port / topics` also currently live in the same YAML.
 
 It no longer owns the source of truth for robot and gripper interfaces.
 
@@ -450,6 +524,8 @@ Currently responsible for:
 - recording rate
 - camera source, serial number, and depth switches
 - freshness thresholds
+- `preview_fps`
+- `preview_api_host / port / jpeg_quality`
 - preview / writer behavior
 - collector-side gripper selection strategy
 
@@ -517,6 +593,8 @@ The key runtime parameters of `robot_commander_node` now come from:
 4. Inference worker lifecycle has been moved into `core/inference_service.py`.
 5. Home persistence has moved from `gui_params.yaml` to a dedicated `home_overrides.yaml`.
 6. `robot_commander_params.yaml` has been removed from the startup chain.
+7. Quest 3 has converged from a bridge prototype into a formal input backend wired into the main launch / teleop path.
+8. Preview cadence has been decoupled from inference-action cadence, and preview recording is now its own local-output path.
 
 ---
 
@@ -578,6 +656,19 @@ Current explicit emergency stop behavior mainly appears in:
 At the moment it mainly covers the GUI-side inference execution chain.
 
 This is not yet a hardware-level, system-wide, unified emergency stop implementation.
+
+## 8.5 Quest-Side Experience Is Still Lightweight
+
+The current Quest page mainly solves:
+
+- controller input
+- ROS2 teleop integration
+
+It does not yet fully integrate:
+
+- floating camera preview panels
+- controller haptics
+- richer Quest-side status UI
 
 ---
 

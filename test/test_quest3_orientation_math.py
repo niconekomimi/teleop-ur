@@ -13,6 +13,10 @@ sys.path.insert(0, str(REPO_ROOT / "src/teleop_control_py"))
 
 from teleop_control_py.utils.transform_utils import (  # noqa: E402
     apply_deadzone,
+    axis_mapping_sign_to_rotation_matrix,
+    clip_rotvec_magnitude,
+    finite_difference_body_angular_velocity,
+    finite_difference_linear_velocity,
     quat_multiply_xyzw,
     quat_to_shortest_rotvec_xyzw,
     relative_body_quat_delta_xyzw,
@@ -81,3 +85,43 @@ def test_rebase_pose_can_decouple_position_from_orientation() -> None:
     assert np.allclose(decoupled_pos, np.array([0.1, 0.0, 0.0], dtype=np.float64), atol=1e-8)
     assert not np.allclose(rotated_pos, decoupled_pos, atol=1e-8)
     assert np.allclose(quat_to_shortest_rotvec_xyzw(decoupled_quat), quat_to_shortest_rotvec_xyzw(rotated_quat))
+
+
+def test_finite_difference_linear_velocity_is_zero_when_hand_stops() -> None:
+    previous = np.array([0.1, -0.2, 0.3], dtype=np.float64)
+    current = previous.copy()
+    velocity = finite_difference_linear_velocity(previous, current, 0.01)
+
+    assert np.allclose(velocity, np.zeros(3, dtype=np.float64), atol=1e-8)
+
+
+def test_finite_difference_body_angular_velocity_uses_neighbor_samples() -> None:
+    previous = rotvec_to_quat_xyzw(np.zeros(3, dtype=np.float64))
+    current = rotvec_to_quat_xyzw(np.deg2rad(np.array([0.0, 0.0, 9.0], dtype=np.float64)))
+    angular_velocity = finite_difference_body_angular_velocity(previous, current, 0.1)
+
+    assert np.allclose(
+        angular_velocity,
+        np.deg2rad(np.array([0.0, 0.0, 90.0], dtype=np.float64)),
+        atol=1e-6,
+    )
+
+
+def test_axis_mapping_sign_to_rotation_matrix_matches_current_quest_linear_mapping() -> None:
+    rotation = axis_mapping_sign_to_rotation_matrix([0, 2, 1], [-1.0, 1.0, 1.0])
+
+    basis_x = rotation @ np.array([1.0, 0.0, 0.0], dtype=np.float64)
+    basis_y = rotation @ np.array([0.0, 1.0, 0.0], dtype=np.float64)
+    basis_z = rotation @ np.array([0.0, 0.0, 1.0], dtype=np.float64)
+
+    assert np.allclose(basis_x, np.array([-1.0, 0.0, 0.0], dtype=np.float64))
+    assert np.allclose(basis_y, np.array([0.0, 0.0, 1.0], dtype=np.float64))
+    assert np.allclose(basis_z, np.array([0.0, 1.0, 0.0], dtype=np.float64))
+
+
+def test_clip_rotvec_magnitude_limits_large_single_clutch_rotation() -> None:
+    raw = np.deg2rad(np.array([0.0, 0.0, 120.0], dtype=np.float64))
+    clipped = clip_rotvec_magnitude(raw, np.deg2rad(90.0))
+
+    assert np.isclose(float(np.linalg.norm(clipped)), np.deg2rad(90.0), atol=1e-6)
+    assert clipped[2] > 0.0

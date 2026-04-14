@@ -2,7 +2,7 @@
 
 # Current Control Behavior Spec v0.1
 
-Last updated: 2026-03-29
+Last updated: 2026-04-09
 
 This document describes only the actual current runtime behavior. It does not describe the future target architecture.
 
@@ -15,7 +15,9 @@ This document covers:
 - teleoperation
 - Home / Home Zone
 - recording
+- preview / preview recording
 - inference execution
+- current Quest 3 WebXR bridge integration behavior
 - GUI-side intent blocking
 - current control ownership and arbitration rules
 
@@ -127,6 +129,45 @@ The GUI uses it to manage:
 - robot driver processes
 - teleop processes
 - collection processes
+
+## 2.7 `quest3_webxr_bridge_node`
+
+Responsibilities:
+
+- Provides a `Vuer`-based WebXR / websocket bridge
+- Converts Quest Browser controller streams into ROS2 topics
+- Publishes Quest connection state
+
+Inputs:
+
+- WebXR controller events from Quest Browser
+
+Outputs:
+
+- `/quest3/left_controller/pose`
+- `/quest3/right_controller/pose`
+- `/quest3/left_controller/matrix`
+- `/quest3/right_controller/matrix`
+- `/quest3/input/joy`
+- `/quest3/connected`
+
+## 2.8 `PreviewRecordingWorker`
+
+Responsibilities:
+
+- Receives global / wrist frames from the currently active preview path
+- Writes local `mp4` files independently
+- Supports `global`, `wrist`, and `both`
+- Supports `source` and `square` frame-size modes
+
+Output directory:
+
+- `data/preview_recordings/<timestamp>/global.mp4`
+- `data/preview_recordings/<timestamp>/wrist.mp4`
+
+Note:
+
+- It does not write HDF5 and does not replace `data_collector_node`
 
 ---
 
@@ -309,11 +350,87 @@ Flow:
 
 Current default semantics:
 
-- `active_hand = left`
-- left-hand `squeeze / grip` acts as clutch
-- left-hand `trigger` acts as gripper
+- `active_hand = right`
+- right-hand `squeeze / grip` acts as clutch
+- right-hand `trigger` acts as gripper
 - input-side low-pass smoothing is disabled by default
 - `frame reset` is scoped to `active_hand` by default
+
+### Current `quest3` connection prerequisites and recommended entry URL
+
+Prerequisites:
+
+- Quest and the PC must be on the same LAN
+- Quest should use the PC's Wi-Fi IPv4 address, not the robot wired NIC address
+
+Current recommended entry URL:
+
+```text
+https://vuer.ai?ws=wss://<pc_wifi_ip>:8012
+```
+
+Additional notes:
+
+- The first visit usually requires one manual certificate acceptance in Quest Browser
+- `control_system.launch.py` automatically starts `quest3_webxr_bridge_node` when `input_type:=quest3` and `launch_quest3_bridge` resolves to enabled
+- During development it is better to start the bridge and teleop separately to avoid reconnecting the Quest page repeatedly
+
+### Current `quest3` ROS topics
+
+- `/quest3/left_controller/pose`
+- `/quest3/right_controller/pose`
+- `/quest3/left_controller/matrix`
+- `/quest3/right_controller/matrix`
+- `/quest3/input/joy`
+- `/quest3/connected`
+
+### Current default `quest3` frame-reset parameters
+
+- `quest3_frame_reset_enabled: true`
+- `quest3_frame_reset_scope: "active_hand"`
+- `quest3_frame_reset_hold_sec: 0.75`
+- `quest3_frame_reset_rotate_position: false`
+- left hand: `X + Y`, i.e. `buttons [4, 5]`
+- right hand: `A + B`, i.e. `buttons [10, 11]`
+
+Behavior semantics:
+
+1. Hold the combo for about `0.75s`
+2. The current controller pose for that hand becomes the new relative reference frame
+3. By default, only the translation origin and orientation zero-point are reset; the translation axes are not additionally rotated by that orientation reset
+4. Later `clutch / pose delta / hand_relative orientation` behavior is interpreted inside that frame
+
+### Current `/quest3/input/joy` mapping
+
+`axes` order:
+
+1. `left.triggerValue`
+2. `left.squeezeValue`
+3. `left.touchpadX`
+4. `left.touchpadY`
+5. `left.thumbstickX`
+6. `left.thumbstickY`
+7. `right.triggerValue`
+8. `right.squeezeValue`
+9. `right.touchpadX`
+10. `right.touchpadY`
+11. `right.thumbstickX`
+12. `right.thumbstickY`
+
+`buttons` order:
+
+1. `left.trigger`
+2. `left.squeeze`
+3. `left.touchpad`
+4. `left.thumbstick`
+5. `left.xButton` / `left.aButton`
+6. `left.yButton` / `left.bButton`
+7. `right.trigger`
+8. `right.squeeze`
+9. `right.touchpad`
+10. `right.thumbstick`
+11. `right.aButton`
+12. `right.bButton`
 
 ## 4.3 Teleop Continuous Loop
 
@@ -449,6 +566,69 @@ Behavior:
 2. Calls `RecorderService.discard_last_demo()`
 3. Discards the latest demo and rolls back the demo index
 
+### Preview-window image source priority
+
+Current priority:
+
+1. Data collector Preview API
+2. Direct inference preview
+3. No active image source
+
+That means:
+
+- If the data collector is running and the preview window is open, the GUI prefers the collector-forwarded preview stream
+- If the data collector is not running but inference is running and the preview window is open, the GUI shows the inference-side direct preview
+- If neither source is available, the preview window shows "no active image source"
+
+### Collector-side preview
+
+The data collector keeps its own dedicated preview timer:
+
+- `preview_fps` defaults to `30.0`
+- the timer period is `1.0 / preview_fps`
+- each timer tick actively pulls the latest global and wrist frames and refreshes the cache
+
+The GUI does not read the collector shared-memory cameras directly. Instead it fetches:
+
+- `GET /preview/global.jpg`
+- `GET /preview/wrist.jpg`
+
+So the collector preview path is:
+
+- updated at a default `30 Hz`
+- delivered through HTTP/JPEG
+- better suited for routine monitoring
+- not ideal as a high-quality recording source
+
+### Preview recording
+
+The preview window includes a separate preview-recording feature. It is intentionally different from the dataset collector:
+
+- the dataset collector writes HDF5 datasets
+- preview recording saves the current preview stream as local `mp4`
+
+Preview recording supports:
+
+- `global`
+- `wrist`
+- `both`
+
+Frame-size modes:
+
+- `source`
+- `square`
+
+Recording files are saved under the local workspace directory:
+
+- `data/preview_recordings/<timestamp>/global.mp4`
+- `data/preview_recordings/<timestamp>/wrist.mp4`
+
+Additional notes:
+
+- preview recording targets `30 Hz`
+- it uses frames from the currently active preview path and does not trigger dataset recording start/stop
+- `data/preview_recordings/.gitkeep` keeps the empty directory in git, while the actual recording artifacts remain local
+
 ## 4.7 Inference Startup and Execution
 
 ### Starting inference
@@ -501,6 +681,26 @@ Actual behavior:
 3. Binarizes the gripper command.
 4. If `active_source != INFERENCE`, skips immediately.
 5. If `active_source == INFERENCE`, dispatches through the coordinator.
+
+### Inference-side preview
+
+Inference currently has two independent cadences:
+
+- the main inference loop still runs at `loop_hz`
+- the preview-forwarding thread independently reads and sends preview frames at `30 Hz`
+
+Enable conditions:
+
+- the preview window is open
+- inference is running
+- the data collector is not currently owning the preview path
+
+This means:
+
+- action output frequency is still determined by `loop_hz`
+- preview refresh is no longer tied to inference frequency
+- as soon as the collector owns the preview path, the GUI prefers the collector-side preview
+- preview overhead has been separated from the main inference loop, so policy output no longer gets directly forced toward `30 Hz`
 
 ### Stopping inference execution
 
@@ -600,7 +800,9 @@ The current system can be understood in these terms:
 - Manual teleop and inference execution are mutually exclusive.
 - Home / Home Zone has higher priority than teleop; for inference execution the behavior is to stop inference first and then run the commander path.
 - Home is executed through the trajectory controller.
-- Home Zone returns Home first, then goes back to Servo control for local pose variation.
+- Home Zone moves through the trajectory controller directly to a sampled target joint state near Home, with no second Cartesian servo stage.
 - Recording actively samples through SDK cameras plus ROS state caches.
+- The preview window prefers the collector Preview API, then direct inference preview; preview recording writes independent local `mp4` files.
 - Inference execution is dispatched through GUI-side `ROS2Worker`, not an independent ROS inference node.
+- Quest 3 enters through `quest3_webxr_bridge_node + Quest3InputHandler`, with frame reset enabled by default.
 - Home can be re-taught at runtime and persisted into `home_overrides.yaml`.

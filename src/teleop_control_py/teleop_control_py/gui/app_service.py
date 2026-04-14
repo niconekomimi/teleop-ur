@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Optional, Sequence
 
-from teleop_control_py.core.inference_worker import build_robot_state_vector
+from teleop_control_py.core.inference_worker import MODELS_ROOT, build_robot_state_vector
 from teleop_control_py.gui.runtime import ProcessManager
 from teleop_control_py.gui.support import build_robot_driver_command, build_teleop_command
 
+from .inference_action_logger import InferenceActionLogger
 from .ros_worker import ROS2Worker
 
 
@@ -92,6 +94,7 @@ class GuiAppService:
         self._preview_robot_state_callback: Optional[Callable[[str], None]] = None
         self._preview_record_stats_callback: Optional[Callable[[int, str, float], None]] = None
         self._preview_bound_worker: Optional[ROS2Worker] = None
+        self._inference_action_logger = InferenceActionLogger(MODELS_ROOT.parent / "data" / "inference_action_logs")
 
     @property
     def ros_worker(self) -> Optional[ROS2Worker]:
@@ -202,6 +205,7 @@ class GuiAppService:
         worker = self._ros_worker
         self._ros_worker = None
         self._preview_bound_worker = None
+        self._inference_action_logger.close()
         if worker is None:
             return
         worker.stop()
@@ -292,6 +296,57 @@ class GuiAppService:
             return False
         worker.update_inference_action_command(action)
         return True
+
+    def start_inference_action_logging(
+        self,
+        *,
+        checkpoint_dir: str,
+        task_name: str,
+        task_embedding_path: str,
+        loop_hz: float,
+        global_camera_source: str,
+        wrist_camera_source: str,
+        device: str,
+        control_hz: float,
+    ) -> Path:
+        session = self._inference_action_logger.start(
+            checkpoint_dir=checkpoint_dir,
+            task_name=task_name,
+            task_embedding_path=task_embedding_path,
+            loop_hz=float(loop_hz),
+            global_camera_source=global_camera_source,
+            wrist_camera_source=wrist_camera_source,
+            device=device,
+            control_hz=float(control_hz),
+        )
+        return session.csv_path
+
+    def record_inference_action_sample(self, action, *, timing: Optional[dict[str, object]] = None) -> bool:
+        return self._inference_action_logger.append(
+            action,
+            execution_enabled=self.inference_execution_enabled(),
+            robot_state=self.current_robot_state(),
+            timing=timing,
+        )
+
+    def stop_inference_action_logging(self) -> Optional[Path]:
+        return self._inference_action_logger.close()
+
+    def annotate_inference_action_log_result(
+        self,
+        csv_path: str | Path,
+        *,
+        outcome: str,
+        stop_reason: str = "",
+    ) -> Optional[Path]:
+        return InferenceActionLogger.annotate_result(
+            csv_path,
+            outcome=outcome,
+            stop_reason=stop_reason,
+        )
+
+    def discard_inference_action_log(self, csv_path: str | Path) -> Optional[Path]:
+        return InferenceActionLogger.discard_session(csv_path)
 
     def ros_worker_required(self, *, preview_running: bool, inference_running: bool) -> bool:
         return bool(

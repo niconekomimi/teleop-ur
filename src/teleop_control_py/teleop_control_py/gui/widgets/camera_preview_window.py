@@ -1,11 +1,13 @@
 import cv2
-from PySide6.QtCore import Qt, Slot
+from PySide6.QtCore import Qt, Signal, Slot
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QDialog,
     QHBoxLayout,
     QLabel,
+    QPushButton,
     QSizePolicy,
     QTextEdit,
     QVBoxLayout,
@@ -13,6 +15,8 @@ from PySide6.QtWidgets import (
 
 
 class CameraPreviewWindow(QDialog):
+    preview_record_toggle_requested = Signal(bool, str)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("实时预览与状态监视器")
@@ -32,11 +36,40 @@ class CameraPreviewWindow(QDialog):
         self.lbl_preview_source = QLabel("预览源: 无活动图像源")
         self.lbl_preview_source.setStyleSheet("font-weight: bold; color: #555;")
         top_layout.addWidget(self.lbl_preview_source)
-
-        self.lbl_record_status = QLabel("状态: 未录制 | 时长: 00:00 | 已录制帧数: 0 | 实时录制帧率: 0.00 Hz")
-        self.lbl_record_status.setStyleSheet("font-weight: bold; font-size: 14px; color: blue;")
-        top_layout.addWidget(self.lbl_record_status)
         main_layout.addLayout(top_layout)
+
+        status_layout = QHBoxLayout()
+        self.lbl_dataset_record_status = QLabel("采集状态: 未录制 | 时长: 00:00 | 已录制帧数: 0 | 实时录制帧率: 0.00 Hz")
+        self.lbl_dataset_record_status.setStyleSheet("font-weight: bold; font-size: 14px; color: blue;")
+        status_layout.addWidget(self.lbl_dataset_record_status, stretch=1)
+
+        self.lbl_preview_record_status = QLabel("预览录屏: 未录制")
+        self.lbl_preview_record_status.setStyleSheet("font-weight: bold; font-size: 14px; color: #555;")
+        status_layout.addWidget(self.lbl_preview_record_status, stretch=1)
+        main_layout.addLayout(status_layout)
+
+        record_controls_layout = QHBoxLayout()
+        record_controls_layout.addWidget(QLabel("预览录屏目标:"))
+        self.preview_record_target_combo = QComboBox()
+        self.preview_record_target_combo.addItem("全局画面", "global")
+        self.preview_record_target_combo.addItem("手部画面", "wrist")
+        self.preview_record_target_combo.addItem("全局 + 手部", "both")
+        self.preview_record_target_combo.setCurrentIndex(2)
+        record_controls_layout.addWidget(self.preview_record_target_combo)
+
+        record_controls_layout.addWidget(QLabel("录屏尺寸:"))
+        self.preview_record_frame_mode_combo = QComboBox()
+        self.preview_record_frame_mode_combo.addItem("源大小", "source")
+        self.preview_record_frame_mode_combo.addItem("中心裁切正方形", "square")
+        self.preview_record_frame_mode_combo.setCurrentIndex(0)
+        record_controls_layout.addWidget(self.preview_record_frame_mode_combo)
+
+        self.btn_preview_record = QPushButton("开始预览录屏")
+        self.btn_preview_record.setCheckable(True)
+        self.btn_preview_record.toggled.connect(self._emit_preview_record_toggle)
+        record_controls_layout.addWidget(self.btn_preview_record)
+        record_controls_layout.addStretch()
+        main_layout.addLayout(record_controls_layout)
 
         content_layout = QHBoxLayout()
         cameras_layout = QVBoxLayout()
@@ -70,6 +103,19 @@ class CameraPreviewWindow(QDialog):
 
     def on_crop_toggled(self, checked):
         self.show_cropped_only = checked
+
+    def _emit_preview_record_toggle(self, checked: bool) -> None:
+        self.preview_record_toggle_requested.emit(bool(checked), self.selected_preview_record_target())
+
+    def selected_preview_record_target(self) -> str:
+        value = self.preview_record_target_combo.currentData()
+        normalized = str(value).strip().lower() if value is not None else "both"
+        return normalized if normalized in {"global", "wrist", "both"} else "both"
+
+    def selected_preview_record_frame_mode(self) -> str:
+        value = self.preview_record_frame_mode_combo.currentData()
+        normalized = str(value).strip().lower() if value is not None else "source"
+        return normalized if normalized in {"source", "square"} else "source"
 
     def process_image(self, cv_img):
         if cv_img is None or len(cv_img.shape) < 2:
@@ -128,12 +174,50 @@ class CameraPreviewWindow(QDialog):
         self.wrist_label.setText("无画面")
 
     @Slot(int, str, float)
-    def update_record_stats(self, frames, time_str, realtime_fps):
+    def update_dataset_record_stats(self, frames, time_str, realtime_fps):
         frames_str = "N/A" if frames is None or int(frames) < 0 else str(int(frames))
         fps_text = f"{float(realtime_fps):.2f} Hz" if realtime_fps is not None else "N/A"
-        self.lbl_record_status.setText(f"状态: 🔴录制中 | 时长: {time_str} | 已录制帧数: {frames_str} | 实时录制帧率: {fps_text}")
-        self.lbl_record_status.setStyleSheet("font-weight: bold; font-size: 14px; color: red;")
+        self.lbl_dataset_record_status.setText(f"采集状态: 录制中 | 时长: {time_str} | 已录制帧数: {frames_str} | 实时录制帧率: {fps_text}")
+        self.lbl_dataset_record_status.setStyleSheet("font-weight: bold; font-size: 14px; color: red;")
+
+    def reset_dataset_record_stats(self):
+        self.lbl_dataset_record_status.setText("采集状态: 未录制 | 时长: 00:00 | 已录制帧数: 0 | 实时录制帧率: 0.00 Hz")
+        self.lbl_dataset_record_status.setStyleSheet("font-weight: bold; font-size: 14px; color: blue;")
+
+    @Slot(str)
+    def update_preview_recording_status(self, text: str) -> None:
+        message = str(text).strip() or "预览录屏: 未录制"
+        color = "#555"
+        if "录制中" in message:
+            color = "#c92a2a"
+        elif "已停止" in message:
+            color = "#1d6f42"
+        self.lbl_preview_record_status.setText(message)
+        self.lbl_preview_record_status.setStyleSheet(f"font-weight: bold; font-size: 14px; color: {color};")
+
+    def set_preview_recording_state(self, active: bool, *, output_dir: str = "") -> None:
+        self.btn_preview_record.blockSignals(True)
+        self.btn_preview_record.setChecked(bool(active))
+        self.btn_preview_record.blockSignals(False)
+        self.btn_preview_record.setText("停止预览录屏" if active else "开始预览录屏")
+        self.preview_record_target_combo.setEnabled(not active)
+        self.preview_record_frame_mode_combo.setEnabled(not active)
+        tooltip = str(output_dir).strip()
+        if tooltip:
+            self.btn_preview_record.setToolTip(tooltip)
+            self.lbl_preview_record_status.setToolTip(tooltip)
+        else:
+            self.btn_preview_record.setToolTip("")
+            self.lbl_preview_record_status.setToolTip("")
+        if active:
+            if "录制中" not in self.lbl_preview_record_status.text():
+                self.update_preview_recording_status("预览录屏: 录制中 | 等待画面...")
+        elif "已停止" not in self.lbl_preview_record_status.text():
+            self.update_preview_recording_status("预览录屏: 未录制")
+
+    @Slot(int, str, float)
+    def update_record_stats(self, frames, time_str, realtime_fps):
+        self.update_dataset_record_stats(frames, time_str, realtime_fps)
 
     def reset_record_stats(self):
-        self.lbl_record_status.setText("状态: 未录制 | 时长: 00:00 | 已录制帧数: 0 | 实时录制帧率: 0.00 Hz")
-        self.lbl_record_status.setStyleSheet("font-weight: bold; font-size: 14px; color: blue;")
+        self.reset_dataset_record_stats()

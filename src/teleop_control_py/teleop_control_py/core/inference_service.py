@@ -104,3 +104,10 @@ class InferenceService:
             return False
         worker.request_task_update(task_name=task_name, task_embedding_path=task_embedding_path)
         return True
+
+    def set_preview_streaming(self, enabled: bool) -> bool:
+        worker = self._worker
+        if worker is None or not worker.isRunning():
+            return False
+        worker.set_preview_streaming(bool(enabled))
+        return True

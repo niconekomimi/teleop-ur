@@ -149,6 +149,10 @@ class InputHandlerBase(ABC):
     def get_command(self) -> tuple[Twist, float]:
         """返回标准化控制命令：(twist, gripper_value)。"""
 
+    def reset_runtime_state(self) -> None:
+        """清空运行时控制参考，避免恢复后沿用旧的 target_pose 锚点。"""
+        self._cache_command(_zero_twist(), self._current_gripper())
+
     def stop(self) -> None:
         """释放输入策略持有的资源。"""
 
@@ -157,6 +161,14 @@ class InputHandlerBase(ABC):
         if callable(cancel_fn):
             try:
                 cancel_fn()
+            except Exception:
+                pass
+
+    def _request_zero_latch(self) -> None:
+        zero_fn = getattr(self.node, "request_input_zero_latch", None)
+        if callable(zero_fn):
+            try:
+                zero_fn()
             except Exception:
                 pass
 
@@ -305,6 +317,7 @@ class JoyInputHandler(InputHandlerBase):
 
         if self._last_deadman_active and not deadman_active:
             self._request_gripper_cancel()
+            self._request_zero_latch()
 
         if deadman_active:
             linear_z = self._axis_value(axes, self._linear_axes[2])
@@ -999,6 +1012,8 @@ class MediaPipeInputHandler(InputHandlerBase):
             if deadman and wrist_pos is not None:
                 pose_ready = self._motion_mode != "target_pose" or self._get_current_tool_pose() is not None
                 if not pose_ready:
+                    if self._deadman_active:
+                        self._request_zero_latch()
                     self._reset_deadman_state()
                     status_text = "WAITING_TCP"
                     status_color = (0, 165, 255)
@@ -1040,6 +1055,7 @@ class MediaPipeInputHandler(InputHandlerBase):
                     self.node.get_logger().info("Deadman released; gesture teleop idle")
                     if self._gripper_requires_deadman:
                         self._request_gripper_cancel()
+                    self._request_zero_latch()
                 self._reset_deadman_state()
                 if wrist_pos is None and deadman:
                     status_text = "WAITING_DEPTH" if self._hand_position_source != "normalized" else "WAITING_HAND"
@@ -1056,6 +1072,7 @@ class MediaPipeInputHandler(InputHandlerBase):
                 self.node.get_logger().info("Hand lost; stopping motion")
                 if self._gripper_requires_deadman:
                     self._request_gripper_cancel()
+                self._request_zero_latch()
             self._reset_deadman_state()
 
         self._cache_command(twist, cached_gripper)
@@ -1145,6 +1162,13 @@ class MediaPipeInputHandler(InputHandlerBase):
         if self._using_sdk_camera:
             self._poll_sdk_camera()
         return self._get_cached_command()
+
+    def reset_runtime_state(self) -> None:
+        self._reset_deadman_state()
+        self._deadman_filtered = False
+        self._deadman_candidate = None
+        self._deadman_candidate_since_ns = 0
+        self._cache_command(_zero_twist(), self._current_gripper())
 
     def stop(self) -> None:
         try:
