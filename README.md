@@ -2,6 +2,10 @@
 
 中文 | [English](README_EN.md)
 
+[![【模仿学习】自己搭建的机器人模仿学习架构](https://i1.hdslb.com/bfs/archive/1d983e799dbbca97152156ce0755d5a8ef2fb6ce.jpg)](https://www.bilibili.com/video/BV13iQuB3E5L/)
+
+> 视频演示：点击封面直达 B 站
+
 面向真实机械臂的遥操作、数据采集与在线推理工作区。当前主使用方式是通过 GUI 统一启动机械臂驱动、遥操作系统、采集节点和推理链路。
 
 当前代码的真实实现说明见：
@@ -129,7 +133,13 @@ flowchart TD
 pip install -r requirements.txt
 ```
 
-如果你需要在线推理 `Real_IL`：
+如果你需要在线推理 `Real_IL`，请先将仓库拉到当前项目根目录，并保持目录名为 `Real_IL`：
+
+```bash
+git clone https://github.com/niconekomimi/Real_IL.git Real_IL
+```
+
+然后安装其依赖：
 
 ```bash
 pip install -r Real_IL/requirements.txt
