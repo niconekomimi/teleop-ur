@@ -121,7 +121,13 @@ Base workspace dependencies:
 pip install -r requirements.txt
 ```
 
-If you also want online `Real_IL` inference:
+If you want online `Real_IL` inference, first clone the repository into the workspace root and keep the directory name as `Real_IL`:
+
+```bash
+git clone https://github.com/niconekomimi/Real_IL.git Real_IL
+```
+
+Then install its dependencies:
 
 ```bash
 pip install -r Real_IL/requirements.txt
