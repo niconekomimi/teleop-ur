@@ -2,7 +2,7 @@
 
 # 当前控制行为规格 v0.1
 
-更新时间：2026-03-29
+更新时间：2026-04-09
 
 这份文档只描述当前代码真实行为，不描述未来目标架构。
 
@@ -15,7 +15,9 @@
 - 遥操作
 - Home / Home Zone
 - 录制
+- 预览 / 预览录屏
 - 推理执行
+- Quest 3 WebXR bridge 当前接入行为
 - GUI 侧意图拦截
 - 当前控制权与仲裁规则
 
@@ -127,6 +129,45 @@ GUI 通过它管理：
 - 机械臂驱动进程
 - 遥操作进程
 - 采集进程
+
+## 2.7 `quest3_webxr_bridge_node`
+
+职责：
+
+- 提供基于 `Vuer` 的 WebXR / websocket bridge
+- 把 Quest Browser 控制器流转成 ROS2 话题
+- 发布 Quest 连接状态
+
+输入：
+
+- Quest Browser 的 WebXR 控制器事件
+
+输出：
+
+- `/quest3/left_controller/pose`
+- `/quest3/right_controller/pose`
+- `/quest3/left_controller/matrix`
+- `/quest3/right_controller/matrix`
+- `/quest3/input/joy`
+- `/quest3/connected`
+
+## 2.8 `PreviewRecordingWorker`
+
+职责：
+
+- 从当前活动预览链接收全局 / 手部画面
+- 独立写本地 `mp4`
+- 支持 `global`、`wrist`、`both`
+- 支持 `source` 和 `square` 两种尺寸模式
+
+输出目录：
+
+- `data/preview_recordings/<timestamp>/global.mp4`
+- `data/preview_recordings/<timestamp>/wrist.mp4`
+
+注意：
+
+- 它不写 HDF5，也不替代 `data_collector_node`
 
 ---
 
@@ -309,11 +350,87 @@ GuiAppService.start_teleop()
 
 当前默认语义：
 
-- `active_hand = left`
-- 左手 `squeeze / grip` 作为 clutch
-- 左手 `trigger` 作为夹爪
+- `active_hand = right`
+- 右手 `squeeze / grip` 作为 clutch
+- 右手 `trigger` 作为夹爪
 - 输入层默认关闭低通平滑
 - `frame reset` 默认只作用于 `active_hand`
+
+### `quest3` 当前连接前提与推荐入口
+
+前提：
+
+- Quest 和 PC 在同一局域网
+- Quest 应使用 PC 的 Wi-Fi IPv4，不要误用机器人有线网卡地址
+
+当前推荐入口：
+
+```text
+https://vuer.ai?ws=wss://<pc_wifi_ip>:8012
+```
+
+补充：
+
+- 第一次访问通常需要在 Quest Browser 手动接受一次证书
+- `control_system.launch.py` 在 `input_type:=quest3` 且 `launch_quest3_bridge` 解析为启用时，会自动启动 `quest3_webxr_bridge_node`
+- 开发期更适合把 bridge 和 teleop 分开启动，避免反复重连 Quest 页面
+
+### `quest3` 当前相关 ROS 话题
+
+- `/quest3/left_controller/pose`
+- `/quest3/right_controller/pose`
+- `/quest3/left_controller/matrix`
+- `/quest3/right_controller/matrix`
+- `/quest3/input/joy`
+- `/quest3/connected`
+
+### `quest3` 当前 frame reset 默认参数
+
+- `quest3_frame_reset_enabled: true`
+- `quest3_frame_reset_scope: "active_hand"`
+- `quest3_frame_reset_hold_sec: 0.75`
+- `quest3_frame_reset_rotate_position: false`
+- 左手：`X + Y`，也就是 `buttons [4, 5]`
+- 右手：`A + B`，也就是 `buttons [10, 11]`
+
+行为语义：
+
+1. 长按组合键约 `0.75s`
+2. 把当前该手控制器姿态记为新的相对参考系
+3. 默认只重置平移零点和姿态零点，不让姿态零点再额外旋进后续平移轴
+4. 后续 `clutch / pose delta / hand_relative orientation` 都基于这个参考系解释
+
+### `/quest3/input/joy` 当前映射
+
+`axes` 顺序：
+
+1. `left.triggerValue`
+2. `left.squeezeValue`
+3. `left.touchpadX`
+4. `left.touchpadY`
+5. `left.thumbstickX`
+6. `left.thumbstickY`
+7. `right.triggerValue`
+8. `right.squeezeValue`
+9. `right.touchpadX`
+10. `right.touchpadY`
+11. `right.thumbstickX`
+12. `right.thumbstickY`
+
+`buttons` 顺序：
+
+1. `left.trigger`
+2. `left.squeeze`
+3. `left.touchpad`
+4. `left.thumbstick`
+5. `left.xButton` / `left.aButton`
+6. `left.yButton` / `left.bButton`
+7. `right.trigger`
+8. `right.squeeze`
+9. `right.touchpad`
+10. `right.thumbstick`
+11. `right.aButton`
+12. `right.bButton`
 
 ## 4.3 遥操作持续循环
 
@@ -449,6 +566,69 @@ GuiAppService.start_data_collector()
 2. `RecorderService.discard_last_demo()`
 3. 丢弃最近一个 demo，并回退 demo 序号
 
+### 预览窗口图像源优先级
+
+当前优先级：
+
+1. 采集节点 Preview API
+2. 推理直连预览
+3. 无活动图像源
+
+也就是说：
+
+- 如果数据采集节点正在运行，且预览窗口处于打开状态，GUI 优先显示采集节点转发的预览画面
+- 如果数据采集节点未运行，但推理线程正在运行，且预览窗口处于打开状态，GUI 显示推理侧直连预览
+- 如果两者都没有可用预览源，预览窗口显示“无活动图像源”
+
+### 采集侧预览
+
+数据采集节点内部维护独立的 preview 定时器：
+
+- `preview_fps` 默认值为 `30.0`
+- 定时器周期为 `1.0 / preview_fps`
+- 每次定时器触发时会主动从全局相机和腕部相机拉取最新帧并刷新缓存
+
+GUI 不直接读取采集节点共享内存相机，而是通过 Preview API 拉取：
+
+- `GET /preview/global.jpg`
+- `GET /preview/wrist.jpg`
+
+因此采集侧 preview 的特点是：
+
+- 预览帧源更新频率默认为 `30 Hz`
+- GUI 侧通过 HTTP/JPEG 获取图像
+- 更适合常规监看
+- 不适合作为高质量录制源
+
+### 预览录屏
+
+预览窗口带有一套独立的“预览录屏”功能，它和数据集采集节点不是同一个概念：
+
+- 数据集采集节点负责写 HDF5 数据集
+- 预览录屏负责把当前预览画面单独保存为本地 `mp4`
+
+预览录屏支持：
+
+- `global`
+- `wrist`
+- `both`
+
+尺寸模式支持：
+
+- `source`
+- `square`
+
+录屏文件保存到仓库本地目录：
+
+- `data/preview_recordings/<timestamp>/global.mp4`
+- `data/preview_recordings/<timestamp>/wrist.mp4`
+
+补充：
+
+- 预览录屏默认按目标 `30 Hz` 写盘
+- 它使用当前预览链路收到的画面，不会触发数据集采集节点的开始/停止录制
+- `data/preview_recordings/.gitkeep` 用来保留空目录，实际录屏产物只保存在本地
+
 ## 4.7 推理启动与执行
 
 ### 启动推理
@@ -501,6 +681,26 @@ GuiAppService.enable_inference_execution()
 3. 夹爪命令做二值化。
 4. 若当前 `active_source != INFERENCE`，直接跳过。
 5. 若当前 `active_source == INFERENCE`，通过协调器下发。
+
+### 推理侧预览
+
+推理侧当前分成两条独立节拍：
+
+- 推理主循环继续按 `loop_hz` 运行
+- 预览转发线程独立按 `30 Hz` 读取并发送预览画面
+
+启用条件：
+
+- 预览窗口处于打开状态
+- 推理线程正在运行
+- 数据采集节点没有接管预览
+
+这意味着：
+
+- 推理动作输出频率仍由 `loop_hz` 决定
+- 预览刷新不再绑定推理频率
+- 只要采集节点接管预览，GUI 就优先显示采集侧画面
+- 预览开销已经从推理主循环里剥离，不再直接把策略输出频率绑到 `30 Hz`
 
 ### 停止推理执行
 
@@ -600,7 +800,9 @@ GUI 点击“设当前姿态为 Home”后的行为：
 - 人工遥操作和推理执行互斥。
 - Home / Home Zone 高于 teleop；对 inference execution 的处理是先停推理再执行 commander 流程。
 - Home 通过轨迹控制器执行。
-- Home Zone 先回 Home，再切回 Servo 控制做位姿扰动。
+- Home Zone 通过 trajectory controller 直接移动到 Home 附近采样出的目标关节位姿，不再经过第二段 Cartesian servo。
 - 录制通过 SDK 相机 + ROS 状态缓存主动采样。
+- 预览窗口优先显示采集节点 API，其次推理直连；预览录屏独立写本地 `mp4`。
 - 推理执行通过 GUI 侧 `ROS2Worker` 闭环下发，不是独立 ROS 推理节点。
+- Quest 3 通过 `quest3_webxr_bridge_node + Quest3InputHandler` 接入，默认支持 frame reset。
 - Home 点可以在运行中重新教点，并持久化到 `home_overrides.yaml`。

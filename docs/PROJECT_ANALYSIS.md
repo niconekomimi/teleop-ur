@@ -2,7 +2,7 @@
 
 # PROJECT_ANALYSIS
 
-更新时间：2026-03-29
+更新时间：2026-04-09
 
 ## 1. 文档目的
 
@@ -47,12 +47,15 @@
 - `teleop_control_py/gui/intent_controller.py`
 - `teleop_control_py/gui/runtime_facade.py`
 - `teleop_control_py/gui/ros_worker.py`
+- `teleop_control_py/gui/http_preview_worker.py`
+- `teleop_control_py/gui/preview_recording_worker.py`
 
 职责边界：
 
 - `main_window.py`
   - 负责控件、布局、用户操作、状态渲染。
   - 不再直接自己拼 ROS service / topic 细节。
+  - 当前也负责预览源切换、预览窗口状态和预览录屏的 UI 编排。
 - `GuiAppService`
   - 管理子进程启动与停止。
   - 管理 `ROS2Worker` 生命周期。
@@ -65,11 +68,18 @@
   - 是 GUI 的 ROS 桥。
   - 负责订阅机器人状态、调用 `data_collector` / `commander` 服务。
   - 在“推理执行”场景下，它自己持有一套 `ControlCoordinator + ServoArmBackend + GripperBackend` 来发动作。
+- `HttpPreviewWorker`
+  - 轮询采集节点 Preview API。
+  - 把采集侧 `HTTP/JPEG` 预览画面转回 GUI。
+- `PreviewRecordingWorker`
+  - 复用当前活动预览源。
+  - 独立写本地 `mp4`，不参与 HDF5 数据集录制。
 
 当前评价：
 
 - GUI 主窗口已经明显变“更像纯 UI”。
 - 但 `ROS2Worker` 仍承担了部分运行时控制职责，尤其是推理执行链。
+- 预览链也仍主要由 GUI 编排：采集 API 轮询、推理直连渲染、预览录屏都在这一层闭环。
 
 ## 3.2 Core Layer
 
@@ -128,6 +138,8 @@
 - `teleop_control_py/nodes/robot_commander_node.py`
 - `teleop_control_py/nodes/data_collector_node.py`
 - `teleop_control_py/nodes/joy_driver_node.py`
+- `teleop_control_py/nodes/quest3_webxr_bridge_node.py`
+- `teleop_control_py/data/preview_api.py`
 - `teleop_control_py/device_manager/*`
 - `teleop_control_py/hardware/*`
 
@@ -150,6 +162,9 @@
   - 独立负责手柄设备接入，发布 `/joy`。
 - `quest3_webxr_bridge_node`
   - 独立负责 Quest Browser WebXR 控制器流接入，发布 `/quest3/*`。
+- `PreviewApiServer`
+  - 从采集节点缓存帧导出 `/preview/global.jpg` 和 `/preview/wrist.jpg`
+  - 给 GUI 预览窗口提供轻量监看接口
 - `device_manager`
   - 提供 `ServoArmBackend / ControllerGripperBackend / SharedMemoryCameraBackend / InputHandlerBackend`
   - 提供 `robot_profile` 加载与默认值装配。
@@ -158,6 +173,7 @@
 
 - 当前系统不是一个大而全的单节点。
 - 它是“多个专职 ROS 节点 + 一层共享 core 模块”的结构。
+- 采集预览也不是共享内存直接进 GUI，而是 collector 侧 HTTP helper 加 GUI 轮询的松耦合路径。
 
 ## 3.4 External Drivers / Dependencies
 
@@ -169,6 +185,7 @@
 - `qbsofthand_control`
 - `pyrealsense2`
 - `depthai`
+- `vuer`
 - `Real_IL` 推理模型及其依赖
 
 控制系统 launch 入口仍然是：
@@ -304,6 +321,7 @@ GuiAppService.start_data_collector()
   - 双相机时间偏差
 - 图像会中心裁剪并强制写成 `224 x 224`。
 - `RecorderService` 负责 demo 序号递增和弃用最近 demo。
+- collector 也可以导出 preview 缓存，但那是监看辅助链，不是主采样链。
 
 服务接口：
 
@@ -332,6 +350,57 @@ GUI
 - 夹爪命令在 `ROS2Worker` 内被离散化为二值开合。
 
 这说明当前“推理执行”仍是 GUI 驱动的控制路径，而不是独立 ROS 推理节点。
+
+## 4.6 预览 / 预览录屏链路
+
+```text
+预览窗口
+-> 采集节点 Preview API 或推理直连预览
+-> 可选 PreviewRecordingWorker
+-> 本地 mp4
+```
+
+当前特征：
+
+- 图像源优先级是：采集节点 Preview API > 推理直连预览 > 无活动图像源。
+- 采集侧预览链是：`data_collector_node` 定时拉帧 -> `PreviewApiServer` 导出 `/preview/*.jpg` -> GUI `HttpPreviewWorker` 轮询显示。
+- 采集侧预览默认目标频率为 `30 Hz`，走 `HTTP/JPEG`，更适合监看，不是高质量录制源。
+- 推理侧预览已经与策略主循环解耦，使用独立 `30 Hz` 预览线程按需推送。
+- 推理预览只在“预览窗口打开 + 推理运行中 + 采集节点未接管预览”时启用。
+- 预览录屏直接叠加在当前活动预览源之上，写到 `data/preview_recordings/<timestamp>/*.mp4`。
+- 预览录屏不是 HDF5 采集，也不会驱动 `data_collector_node` 的开始/停止。
+
+当前评价：
+
+- 预览刷新频率已经和推理动作频率分离，不再强绑定。
+- 这条链路仍然是 GUI 编排的监看路径，不属于机器人底层控制闭环。
+
+## 4.7 Quest 3 / WebXR 链路
+
+```text
+Quest Browser
+-> vuer.ai?ws=wss://<pc_wifi_ip>:8012
+-> quest3_webxr_bridge_node
+-> /quest3/*
+-> Quest3InputHandler
+-> teleop_control_node
+-> ControlCoordinator
+```
+
+当前特征：
+
+- Quest 输入已经不是独立原型，而是正式 `input_type`。
+- `control_system.launch.py` 在 `input_type:=quest3` 且 bridge 开关允许时，可自动带起 `quest3_webxr_bridge_node`。
+- 也支持 `quest3_webxr_bridge.launch.py` + `teleop_control.launch.py input_type:=quest3` 的分离调试方式。
+- bridge 通过 `Vuer` 提供 `https/wss` WebXR 入口，当前推荐 Quest 访问 `https://vuer.ai?ws=wss://<pc_wifi_ip>:8012`。
+- 第一次访问通常需要在 Quest Browser 接受一次证书。
+- `Quest3InputHandler` 默认使用 `relative pose + clutch + hand_relative orientation`。
+- 当前已经支持 Quest2ROS 风格的 frame reset。
+
+当前评价：
+
+- Quest 输入链已经真正接进现有 teleop 架构。
+- 但 Quest 侧页面仍主要聚焦控制器流接入，尚未形成完整的状态 UI / haptics / 浮动面板体验。
 
 ---
 
@@ -435,7 +504,12 @@ GUI
 - 遥操作频率
 - 速度/加速度限幅
 - joy 映射
+- Quest 3 映射、clutch、orientation、frame reset 参数
 - mediapipe 算法参数
+
+补充：
+
+- `quest3_webxr_bridge_node` 的默认 `advertised_host / vuer_port / topic` 等参数当前也暂时放在同一个 YAML 里。
 
 它不再承担机械臂/夹爪接口真值。
 
@@ -449,6 +523,8 @@ GUI
 - 录制频率
 - 相机来源、序列号、depth 开关
 - 时间新鲜度阈值
+- `preview_fps`
+- `preview_api_host / port / jpeg_quality`
 - preview / writer 行为
 - 采集侧 gripper 选择策略
 
@@ -516,6 +592,8 @@ GUI 当前关节角
 4. 推理 worker 生命周期已经下沉到 `core/inference_service.py`。
 5. Home 点持久化已经从 `gui_params.yaml` 迁到独立 `home_overrides.yaml`。
 6. `robot_commander_params.yaml` 已从启动链路移除。
+7. Quest 3 已经从“桥接原型”收敛成正式输入后端，并接进现有 launch / teleop 主链路。
+8. 预览刷新频率已经和推理动作频率解耦，预览录屏也已独立成一条本地输出链。
 
 ---
 
@@ -577,6 +655,19 @@ GUI 当前关节角
 它当前主要覆盖的是“推理执行链”。
 
 这不是一个物理硬件级、全系统统一广播的安全停实现。
+
+## 8.5 Quest 侧体验仍偏轻量
+
+当前 Quest 页面主要解决的是：
+
+- controller input
+- ROS2 teleop integration
+
+还没有完整接入：
+
+- 浮动相机预览面板
+- controller haptics
+- 更丰富的 Quest 侧状态 UI
 
 ---
 

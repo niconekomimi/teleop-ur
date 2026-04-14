@@ -57,6 +57,7 @@ class RobotCommanderNode(Node):
         self._home_zone_lock = threading.Lock()
 
         self._latest_joint_pos: Optional[np.ndarray] = None
+        self._latest_joint_vel: Optional[np.ndarray] = None
         self._latest_pose_pos: Optional[np.ndarray] = None
         self._latest_pose_quat: Optional[np.ndarray] = None
         self._latest_pose_time: Optional[Time] = None
@@ -130,9 +131,11 @@ class RobotCommanderNode(Node):
         joint_pos = self._map_joint_positions(msg)
         if joint_pos is None:
             return
+        joint_vel = self._map_joint_velocities(msg)
 
         with self._cache_lock:
             self._latest_joint_pos = joint_pos
+            self._latest_joint_vel = joint_vel
 
     def _on_tool_pose(self, msg: PoseStamped) -> None:
         pose_time = Time.from_msg(msg.header.stamp)
@@ -161,6 +164,86 @@ class RobotCommanderNode(Node):
                 return None
             out[index] = float(msg.position[msg_index])
         return out
+
+    def _map_joint_velocities(self, msg: JointState) -> Optional[np.ndarray]:
+        if not msg.name or not msg.velocity:
+            return None
+
+        name_to_idx = {name: index for index, name in enumerate(msg.name)}
+        out = np.zeros(len(self._joint_names), dtype=np.float32)
+        for index, joint_name in enumerate(self._joint_names):
+            msg_index = name_to_idx.get(joint_name)
+            if msg_index is None or msg_index >= len(msg.velocity):
+                return None
+            out[index] = float(msg.velocity[msg_index])
+        return out
+
+    def _get_joint_snapshot(self) -> Optional[np.ndarray]:
+        with self._cache_lock:
+            joints = None if self._latest_joint_pos is None else self._latest_joint_pos.copy()
+        if joints is None or len(joints) < 6:
+            return None
+        return joints[:6].astype(np.float64)
+
+    def _get_joint_velocity_snapshot(self) -> Optional[np.ndarray]:
+        with self._cache_lock:
+            velocities = None if self._latest_joint_vel is None else self._latest_joint_vel.copy()
+        if velocities is None or len(velocities) < 6:
+            return None
+        return velocities[:6].astype(np.float64)
+
+    def _flush_zero_twist(self, repeats: int = 5, interval_sec: float = 0.02) -> None:
+        for _ in range(max(1, int(repeats))):
+            self._publish_home_zone_zero_twist()
+            time.sleep(max(0.0, float(interval_sec)))
+
+    def _wait_for_joint_target(
+        self,
+        target_positions: list[float],
+        *,
+        timeout_sec: float,
+        settle_sec: float = 0.2,
+        joint_tolerance_rad: float = 0.01,
+        max_joint_velocity_rad_s: float = 0.03,
+        token: Optional[int] = None,
+    ) -> tuple[bool, float, float]:
+        deadline = time.monotonic() + max(0.2, float(timeout_sec))
+        settle_deadline: Optional[float] = None
+        target = np.asarray(list(target_positions)[:6], dtype=np.float64)
+        last_max_error = float("inf")
+        last_max_velocity = float("inf")
+
+        while time.monotonic() < deadline:
+            if token is not None and self._home_zone_aborted(token):
+                return False, last_max_error, last_max_velocity
+
+            current = self._get_joint_snapshot()
+            if current is None:
+                time.sleep(0.02)
+                continue
+
+            current = np.asarray(current[:6], dtype=np.float64)
+            last_max_error = float(np.max(np.abs(target - current)))
+            current_velocity = self._get_joint_velocity_snapshot()
+            if current_velocity is None:
+                last_max_velocity = 0.0
+                velocity_ok = True
+            else:
+                current_velocity = np.asarray(current_velocity[:6], dtype=np.float64)
+                last_max_velocity = float(np.max(np.abs(current_velocity)))
+                velocity_ok = last_max_velocity <= max(1e-4, float(max_joint_velocity_rad_s))
+
+            if last_max_error <= max(1e-4, float(joint_tolerance_rad)) and velocity_ok:
+                if settle_deadline is None:
+                    settle_deadline = time.monotonic() + max(0.0, float(settle_sec))
+                elif time.monotonic() >= settle_deadline:
+                    return True, last_max_error, last_max_velocity
+            else:
+                settle_deadline = None
+
+            time.sleep(0.02)
+
+        return False, last_max_error, last_max_velocity
 
     def _srv_go_home_cb(self, _req: Trigger.Request, res: Trigger.Response) -> Trigger.Response:
         if self._homing_in_progress or self._home_zone_in_progress:
@@ -196,9 +279,7 @@ class RobotCommanderNode(Node):
     def _cancel_home_zone(self, reason: str) -> None:
         token = self._next_home_zone_token()
         self._publish_home_zone_active(False)
-        for _ in range(5):
-            self._publish_home_zone_zero_twist()
-            time.sleep(0.01)
+        self._flush_zero_twist(repeats=5, interval_sec=0.01)
         threading.Thread(target=self._restore_home_zone_teleop_control, daemon=True).start()
         self.get_logger().info(f"Home Zone cancel requested ({reason}), token={token}")
 
@@ -418,19 +499,29 @@ class RobotCommanderNode(Node):
 
         self._home_pub.publish(trajectory)
         self.get_logger().info(
-            f"Published {motion_label} trajectory with 1 waypoint, waiting {duration:.2f}s..."
+            f"Published {motion_label} trajectory with 1 waypoint, nominal_duration={duration:.2f}s. "
+            "Waiting for joint target convergence..."
         )
 
-        deadline = time.monotonic() + duration + 0.5
-        while time.monotonic() < deadline:
-            if token is not None and self._home_zone_aborted(token):
-                return False
-            time.sleep(0.05)
+        reached_target, last_max_error, last_max_velocity = self._wait_for_joint_target(
+            target_positions,
+            timeout_sec=max(duration + 0.5, duration * 4.0, 8.0),
+            settle_sec=0.25,
+            joint_tolerance_rad=0.01,
+            max_joint_velocity_rad_s=0.03,
+            token=token,
+        )
 
         if token is not None and self._home_zone_aborted(token):
             return False
+        if not reached_target:
+            self.get_logger().warn(
+                f"{motion_label} joint target was not confirmed before restore timeout; "
+                f"last_max_error={last_max_error:.4f} rad last_max_velocity={last_max_velocity:.4f} rad/s"
+            )
         if not self._switch_home_zone_controllers([teleop_ctrl], [traj_ctrl], timeout_sec=2.0):
             raise RuntimeError(f"{motion_label} 无法恢复 {teleop_ctrl}")
+        self._flush_zero_twist(repeats=5, interval_sec=0.02)
         self.get_logger().info(f"{motion_label} trajectory complete. Teleop restored.")
         return True
 
@@ -601,9 +692,7 @@ class RobotCommanderNode(Node):
         finally:
             self._publish_home_zone_active(False)
             self._publish_motion_result("go_home_zone", outcome, detail)
-            for _ in range(5):
-                self._publish_home_zone_zero_twist()
-                time.sleep(0.02)
+            self._flush_zero_twist(repeats=5, interval_sec=0.02)
             self._homing_in_progress = False
             self._publish_homing_active(False)
             self._home_zone_in_progress = False

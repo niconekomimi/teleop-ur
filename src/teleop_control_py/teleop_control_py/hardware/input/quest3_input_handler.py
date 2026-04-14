@@ -539,6 +539,7 @@ class Quest3InputHandler(InputHandlerBase):
                 self.node.get_logger().warn("Quest3 stream disconnected; stopping motion.")
                 if self._gripper_requires_clutch:
                     self._request_gripper_cancel()
+                self._request_zero_latch()
             self._reset_control_state()
             self._cache_command(twist, gripper)
             return
@@ -584,9 +585,17 @@ class Quest3InputHandler(InputHandlerBase):
                 self.node.get_logger().info(f"Quest3 teleop idle ({reason}).")
                 if self._gripper_requires_clutch:
                     self._request_gripper_cancel()
+                self._request_zero_latch()
             self._reset_control_state()
 
         self._cache_command(twist, gripper)
 
     def get_command(self) -> tuple[Twist, float]:
         return self._get_cached_command()
+
+    def reset_runtime_state(self) -> None:
+        self._reset_control_state()
+        self._clutch_filtered = False
+        self._clutch_candidate = None
+        self._clutch_candidate_since_ns = 0
+        self._cache_command(_zero_twist(), self._current_gripper())

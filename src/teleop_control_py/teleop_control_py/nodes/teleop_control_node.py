@@ -86,6 +86,8 @@ class TeleopControlNode(Node):
         self._last_twist_vec = np.zeros(6, dtype=np.float64)
         self._last_loop_time = time.monotonic()
         self._home_zone_active = False
+        self._homing_active = False
+        self._input_zero_latched = False
 
         self.input_handler = self._build_input_handler(self._input_type)
         self.gripper_ctrl = self._build_gripper_controller(self._gripper_type)
@@ -108,6 +110,12 @@ class TeleopControlNode(Node):
             self._on_home_zone_active,
             10,
         )
+        self._homing_active_sub = self.create_subscription(
+            Bool,
+            "/commander/homing_active",
+            self._on_homing_active,
+            10,
+        )
 
         self._timer = self.create_timer(1.0 / self._control_hz, self._control_loop)
         self.get_logger().info(
@@ -116,6 +124,16 @@ class TeleopControlNode(Node):
             f"zero_return_accel_scale={self._zero_return_accel_scale:.2f}, "
             f"linear_z_zero_return_accel_scale={self._linear_z_zero_return_accel_scale:.2f}"
         )
+
+    def _reset_input_runtime_state(self) -> None:
+        self._last_twist_vec = np.zeros(6, dtype=np.float64)
+        self._input_zero_latched = False
+        reset_fn = getattr(self._input_backend, "reset_runtime_state", None)
+        if callable(reset_fn):
+            reset_fn()
+
+    def request_input_zero_latch(self) -> None:
+        self._input_zero_latched = True
 
     def _declare_parameters(self, robot_profile) -> None:
         grippers = robot_profile.grippers
@@ -309,13 +327,27 @@ class TeleopControlNode(Node):
             return
 
         self._home_zone_active = active
-        self._last_twist_vec = np.zeros(6, dtype=np.float64)
+        self._reset_input_runtime_state()
         self._control_coordinator.notify_home_zone(active)
 
         if active:
             self.get_logger().info("Home Zone active. Teleop output paused until Home Zone finishes.")
         else:
             self.get_logger().info("Home Zone inactive. Teleop output resumed.")
+
+    def _on_homing_active(self, msg: Bool) -> None:
+        active = bool(msg.data)
+        if active == self._homing_active:
+            return
+
+        self._homing_active = active
+        self._reset_input_runtime_state()
+        self._control_coordinator.notify_homing(active)
+
+        if active:
+            self.get_logger().info("Homing active. Teleop output paused until Home finishes.")
+        else:
+            self.get_logger().info("Homing inactive. Teleop output resumed.")
 
     def cancel_gripper_motion(self) -> None:
         cancel_fn = getattr(self._gripper_backend, "cancel_motion", None)
@@ -326,15 +358,22 @@ class TeleopControlNode(Node):
                 pass
 
     def _control_loop(self) -> None:
-        command = self._input_backend.get_action_command()
         now = time.monotonic()
         dt = max(1e-4, now - self._last_loop_time)
         self._last_loop_time = now
 
-        target_vec = command.twist_vector()
-        if self._home_zone_active:
-            self._last_twist_vec = np.zeros(6, dtype=np.float64)
+        if self._home_zone_active or self._homing_active:
+            self._reset_input_runtime_state()
             return
+
+        if self._input_zero_latched:
+            self._last_twist_vec = np.zeros(6, dtype=np.float64)
+            self._control_coordinator.publish_zero(source=ControlSource.TELEOP)
+            self._input_zero_latched = False
+            return
+
+        command = self._input_backend.get_action_command()
+        target_vec = command.twist_vector()
 
         effective_acceleration = self._max_acceleration.copy()
         zero_axes = np.isclose(target_vec, 0.0, atol=1e-6)

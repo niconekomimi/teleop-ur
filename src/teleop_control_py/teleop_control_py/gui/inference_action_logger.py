@@ -54,6 +54,83 @@ def _timing_int(timing: Optional[dict[str, object]], key: str, default: int) -> 
         return int(default)
 
 
+def _parse_scalar_text(value: str) -> object:
+    text = str(value).strip()
+    if not text:
+        return ""
+
+    lowered = text.lower()
+    if lowered in {"true", "false"}:
+        return lowered == "true"
+    if lowered in {"null", "none"}:
+        return None
+
+    if (text.startswith('"') and text.endswith('"')) or (text.startswith("'") and text.endswith("'")):
+        return text[1:-1]
+
+    try:
+        if any(token in text for token in (".", "e", "E")):
+            return float(text)
+        return int(text)
+    except Exception:
+        return text
+
+
+def _extract_checkpoint_policy_metadata(checkpoint_dir: Path) -> dict[str, object]:
+    config_path = checkpoint_dir / ".hydra" / "config.yaml"
+    if not config_path.is_file():
+        return {}
+
+    target_keys = {
+        "replan_every",
+        "overlap_blend_steps",
+        "overlap_blend_new_weight_start",
+        "overlap_blend_new_weight_end",
+        "overlap_blend_mode",
+        "overlap_blend_power",
+    }
+    metadata: dict[str, object] = {
+        "checkpoint_config_path": str(config_path.resolve()),
+    }
+
+    try:
+        lines = config_path.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return metadata
+
+    in_agents_block = False
+    agents_indent = 0
+    for raw_line in lines:
+        line = raw_line.split("#", 1)[0].rstrip()
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        indent = len(line) - len(line.lstrip(" "))
+        if not in_agents_block:
+            if stripped == "agents:":
+                in_agents_block = True
+                agents_indent = indent
+            continue
+
+        if indent <= agents_indent:
+            break
+
+        if indent != agents_indent + 2:
+            continue
+
+        if ":" not in stripped:
+            continue
+
+        key, raw_value = stripped.split(":", 1)
+        key = key.strip()
+        if key not in target_keys:
+            continue
+        metadata[key] = _parse_scalar_text(raw_value)
+
+    return metadata
+
+
 @dataclass(frozen=True)
 class InferenceActionLogSession:
     session_dir: Path
@@ -84,6 +161,15 @@ class InferenceActionLogger:
             return None
         return self._session.csv_path
 
+    def _write_metadata(self) -> None:
+        session = self._session
+        if session is None:
+            return
+        session.metadata_path.write_text(
+            json.dumps(self._metadata, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
     def start(
         self,
         *,
@@ -99,10 +185,11 @@ class InferenceActionLogger:
         self.close()
 
         timestamp = datetime.now().astimezone()
+        resolved_checkpoint_dir = Path(checkpoint_dir).expanduser().resolve()
         session_name = (
             f"{timestamp:%Y%m%d_%H%M%S}_"
             f"{_sanitize_fragment(task_name, 'task')}_"
-            f"{_sanitize_fragment(Path(checkpoint_dir).name, 'model')}"
+            f"{_sanitize_fragment(resolved_checkpoint_dir.name, 'model')}"
         )
         session_dir = self._output_root / session_name
         session_dir.mkdir(parents=True, exist_ok=True)
@@ -153,7 +240,7 @@ class InferenceActionLogger:
 
         self._metadata = {
             "created_at_iso": timestamp.isoformat(timespec="seconds"),
-            "checkpoint_dir": str(Path(checkpoint_dir).expanduser().resolve()),
+            "checkpoint_dir": str(resolved_checkpoint_dir),
             "task_name": str(task_name),
             "task_embedding_path": str(Path(task_embedding_path).expanduser().resolve()),
             "loop_hz": float(loop_hz),
@@ -163,7 +250,8 @@ class InferenceActionLogger:
             "device": str(device or "auto"),
             "steps_recorded": 0,
         }
-        session.metadata_path.write_text(json.dumps(self._metadata, indent=2, ensure_ascii=False), encoding="utf-8")
+        self._metadata.update(_extract_checkpoint_policy_metadata(resolved_checkpoint_dir))
+        self._write_metadata()
 
         self._session = session
         self._csv_handle = csv_handle
@@ -244,10 +332,7 @@ class InferenceActionLogger:
             self._metadata["closed_at_iso"] = datetime.now().astimezone().isoformat(timespec="seconds")
             self._metadata["steps_recorded"] = int(self._step_idx)
             self._metadata["duration_sec"] = float(max(0.0, time.perf_counter() - self._start_monotonic))
-            session.metadata_path.write_text(
-                json.dumps(self._metadata, indent=2, ensure_ascii=False),
-                encoding="utf-8",
-            )
+            self._write_metadata()
         except Exception:
             pass
 

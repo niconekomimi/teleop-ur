@@ -8,7 +8,6 @@ For the code-accurate architecture and behavior:
 
 - [docs/PROJECT_ANALYSIS_EN.md](docs/PROJECT_ANALYSIS_EN.md)
 - [docs/current_control_behavior_spec_v0.1_EN.md](docs/current_control_behavior_spec_v0.1_EN.md)
-- [docs/QUEST3_WEBXR_VUER_EN.md](docs/QUEST3_WEBXR_VUER_EN.md)
 
 ## Overview
 
@@ -28,9 +27,70 @@ Current default stack:
 
 ## Architecture
 
-The figure below is the current top-level architecture overview. The README uses a static `SVG` so the layout stays clean on the web, instead of relying on a large Mermaid graph. For detailed runtime behavior, see [docs/PROJECT_ANALYSIS_EN.md](docs/PROJECT_ANALYSIS_EN.md).
+The following Mermaid diagram is the intended top-level architecture used by the project. The current implementation has already landed a large part of it, while some runtime responsibilities are still split across ROS nodes and the GUI bridge.
 
-![Architecture Overview](docs/assets/architecture_overview.svg)
+```mermaid
+flowchart TD
+    classDef ui fill:#e3f2fd,stroke:#1e88e5,stroke-width:2px,color:#000
+    classDef core fill:#fff3e0,stroke:#fb8c00,stroke-width:2px,color:#000
+    classDef backend fill:#e8f5e9,stroke:#43a047,stroke-width:2px,color:#000
+    classDef hw fill:#f3e5f5,stroke:#8e24aa,stroke-width:2px,color:#000
+
+    subgraph TaskLayer ["GUI / Task Layer"]
+        UI["GUI Main Window<br/>(intent only)"]:::ui
+        Editor["Offline Dataset Editor"]:::ui
+    end
+
+    subgraph CoreLayer ["Core Layer"]
+        Orchestrator["SystemOrchestrator / StateMachine"]:::core
+        MUX{"MUX"}:::core
+        SyncHub["SyncHub"]:::core
+        Recorder["Recorder"]:::core
+        Infer["InferenceService"]:::core
+        Commander["Commander / SafetyManager"]:::core
+
+        subgraph DeviceManager ["DeviceManager / Adapters"]
+            direction LR
+            InBE["InputBackend"]:::backend
+            ArmBE["ArmBackend"]:::backend
+            GripBE["GripperBackend"]:::backend
+            CamBE["CameraBackend"]:::backend
+        end
+    end
+
+    subgraph HardwareLayer ["Hardware Layer"]
+        direction LR
+        JoyHW["Joy / MediaPipe"]:::hw
+        RobotHW["UR5 / Franka / Aubo<br/>(Driver + MoveIt Servo)"]:::hw
+        GripHW["Robotiq / qbSoftHand"]:::hw
+        CamHW["RealSense / OAK-D<br/>(SDK / SHM)"]:::hw
+    end
+
+    UI --> Orchestrator
+    Orchestrator --> MUX
+    Orchestrator --> Recorder
+    Orchestrator --> Infer
+    Orchestrator --> SyncHub
+    Orchestrator --> Commander
+
+    InBE -->|"ActionCommand"| MUX
+    Infer -->|"ActionCommand"| MUX
+    Commander -->|"High-priority control"| MUX
+
+    MUX -->|"send_delta_twist()"| ArmBE
+    MUX -->|"set_gripper()"| GripBE
+
+    SyncHub -->|"Observation snapshot"| Recorder
+    SyncHub -->|"Observation snapshot"| Infer
+    SyncHub -->|"robot state"| ArmBE
+    SyncHub -->|"gripper state"| GripBE
+    SyncHub -->|"camera frame"| CamBE
+
+    InBE -.-> JoyHW
+    ArmBE -.-> RobotHW
+    GripBE -.-> GripHW
+    CamBE -.-> CamHW
+```
 
 Implementation notes:
 
@@ -119,11 +179,11 @@ ros2 launch teleop_control_py control_system.launch.py input_type:=joy gripper_t
 Notes:
 
 - When `input_type:=quest3`, `control_system.launch.py` will auto-start `quest3_webxr_bridge_node`
-- The recommended Quest entry URL and setup notes are documented in [docs/QUEST3_WEBXR_VUER_EN.md](docs/QUEST3_WEBXR_VUER_EN.md)
+- The recommended Quest entry URL and setup notes are documented in [docs/current_control_behavior_spec_v0.1_EN.md](docs/current_control_behavior_spec_v0.1_EN.md)
 
 For Quest3-specific bringup details, split-launch workflows, and teleop mapping notes, see:
 
-- [docs/QUEST3_WEBXR_VUER_EN.md](docs/QUEST3_WEBXR_VUER_EN.md)
+- [docs/PROJECT_ANALYSIS_EN.md](docs/PROJECT_ANALYSIS_EN.md)
 - [docs/current_control_behavior_spec_v0.1_EN.md](docs/current_control_behavior_spec_v0.1_EN.md)
 
 Collector-only launch:
@@ -166,7 +226,7 @@ Key current behavior:
 - `quest3` defaults to `relative pose + clutch + hand_relative orientation`, with input smoothing disabled by default
 - `quest3` supports Quest2ROS-style relative frame reset, scoped to `active_hand` by default
 - `Home` uses the trajectory controller
-- `Home Zone` first returns home, then switches back to Servo control for local pose adjustment
+- `Home Zone` moves through the trajectory controller directly to a sampled target joint state near Home
 - `Home Zone` is not automatically canceled by new manual input
 - The collector uses SDK camera pulling as the primary recording path rather than ROS image topics
 

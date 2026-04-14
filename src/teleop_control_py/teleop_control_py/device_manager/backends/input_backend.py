@@ -14,6 +14,11 @@ class InputHandlerBackend:
         twist, gripper = self._handler.get_command()
         return ActionCommand.from_twist(twist, gripper=gripper, source=self._source)
 
+    def reset_runtime_state(self) -> None:
+        reset_fn = getattr(self._handler, 'reset_runtime_state', None)
+        if callable(reset_fn):
+            reset_fn()
+
     def stop(self) -> None:
         stop_fn = getattr(self._handler, 'stop', None)
         if callable(stop_fn):

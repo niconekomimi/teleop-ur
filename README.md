@@ -8,7 +8,6 @@
 
 - [docs/PROJECT_ANALYSIS.md](docs/PROJECT_ANALYSIS.md)
 - [docs/current_control_behavior_spec_v0.1.md](docs/current_control_behavior_spec_v0.1.md)
-- [docs/QUEST3_WEBXR_VUER.md](docs/QUEST3_WEBXR_VUER.md)
 
 ## 项目定位
 
@@ -28,9 +27,70 @@
 
 ## 架构图
 
-下面这张图是项目当前采用的顶层分层总览图。README 里使用静态 `SVG`，避免大 `Mermaid` 在网页中出现换行、缩放和主题渲染问题。更细的运行时说明见 [docs/PROJECT_ANALYSIS.md](docs/PROJECT_ANALYSIS.md)。
+下面这张图是项目当前采用的顶层分层设计图。当前代码已经部分落地，真实落地情况以 `docs/PROJECT_ANALYSIS.md` 为准。
 
-![架构总览图](docs/assets/architecture_overview.svg)
+```mermaid
+flowchart TD
+    classDef ui fill:#e3f2fd,stroke:#1e88e5,stroke-width:2px,color:#000
+    classDef core fill:#fff3e0,stroke:#fb8c00,stroke-width:2px,color:#000
+    classDef backend fill:#e8f5e9,stroke:#43a047,stroke-width:2px,color:#000
+    classDef hw fill:#f3e5f5,stroke:#8e24aa,stroke-width:2px,color:#000
+
+    subgraph TaskLayer ["GUI / Task Layer"]
+        UI["GUI 主界面<br/>(只发意图，不碰硬件)"]:::ui
+        Editor["离线数据编辑器"]:::ui
+    end
+
+    subgraph CoreLayer ["Core Layer"]
+        Orchestrator["SystemOrchestrator / StateMachine<br/>(顶层协调器)"]:::core
+        MUX{"MUX<br/>(动作仲裁)"}:::core
+        SyncHub["SyncHub<br/>(统一采样时钟)"]:::core
+        Recorder["Recorder<br/>(录制器)"]:::core
+        Infer["InferenceService<br/>(推理服务)"]:::core
+        Commander["Commander / SafetyManager<br/>(Home / HomeZone / E-Stop)"]:::core
+
+        subgraph DeviceManager ["DeviceManager / Adapters"]
+            direction LR
+            InBE["InputBackend"]:::backend
+            ArmBE["ArmBackend"]:::backend
+            GripBE["GripperBackend"]:::backend
+            CamBE["CameraBackend"]:::backend
+        end
+    end
+
+    subgraph HardwareLayer ["Hardware Layer"]
+        direction LR
+        JoyHW["Joy / MediaPipe"]:::hw
+        RobotHW["UR5 / Franka / Aubo<br/>(官方驱动 + MoveIt Servo)"]:::hw
+        GripHW["Robotiq / qbSoftHand"]:::hw
+        CamHW["RealSense / OAK-D<br/>(SDK / SHM)"]:::hw
+    end
+
+    UI --> Orchestrator
+    Orchestrator --> MUX
+    Orchestrator --> Recorder
+    Orchestrator --> Infer
+    Orchestrator --> SyncHub
+    Orchestrator --> Commander
+
+    InBE -->|"ActionCommand"| MUX
+    Infer -->|"ActionCommand"| MUX
+    Commander -->|"高优先级控制"| MUX
+
+    MUX -->|"send_delta_twist()"| ArmBE
+    MUX -->|"set_gripper()"| GripBE
+
+    SyncHub -->|"观测快照"| Recorder
+    SyncHub -->|"观测快照"| Infer
+    SyncHub -->|"get_joint_state()/get_tcp_pose()"| ArmBE
+    SyncHub -->|"get_state()"| GripBE
+    SyncHub -->|"get_frame()"| CamBE
+
+    InBE -.-> JoyHW
+    ArmBE -.-> RobotHW
+    GripBE -.-> GripHW
+    CamBE -.-> CamHW
+```
 
 当前实现上的几个关键事实：
 
@@ -162,7 +222,7 @@ ros2 launch teleop_control_py control_system.launch.py \
 说明：
 
 - `input_type:=quest3` 时，`control_system.launch.py` 默认会自动启动 `quest3_webxr_bridge_node`
-- Quest 侧推荐入口见 [docs/QUEST3_WEBXR_VUER.md](docs/QUEST3_WEBXR_VUER.md)
+- Quest 侧推荐入口见 [docs/current_control_behavior_spec_v0.1.md](docs/current_control_behavior_spec_v0.1.md)
 
 整套系统 + 采集节点：
 
@@ -175,7 +235,7 @@ ros2 launch teleop_control_py control_system.launch.py \
 
 更多分离启动、参数调试和 Quest3 专项说明见：
 
-- [docs/QUEST3_WEBXR_VUER.md](docs/QUEST3_WEBXR_VUER.md)
+- [docs/PROJECT_ANALYSIS.md](docs/PROJECT_ANALYSIS.md)
 - [docs/current_control_behavior_spec_v0.1.md](docs/current_control_behavior_spec_v0.1.md)
 
 ## 单独启动采集节点
@@ -207,7 +267,7 @@ ros2 service call /commander/go_home_zone std_srvs/srv/Trigger {}
 - `quest3` 默认采用 `relative pose + clutch + hand_relative orientation`，输入层默认关闭低通滤波
 - `quest3` 支持 Quest2ROS 风格的相对 frame 重置，默认只作用于 `active_hand`
 - `Home` 通过 trajectory controller 执行
-- `Home Zone` 先回 Home，再切回 Servo 控制做位姿扰动
+- `Home Zone` 通过 trajectory controller 直接移动到 Home 附近采样出的目标关节位姿
 - `Home Zone` 不会被新的人工输入自动取消
 - 录制主链路使用 SDK 相机主动拉帧，不以 ROS 图像 topic 为主采样路径
 

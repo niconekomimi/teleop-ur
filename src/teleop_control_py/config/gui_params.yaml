@@ -31,7 +31,7 @@ teleop_gui:
     default_inference_wrist_camera_source: oakd
     default_inference_wrist_camera_model: oakd
     default_inference_wrist_camera_serial_number: 1944301081F3181300
-    default_inference_model_dir: /home/rvl/collect_datasets_ws/models/08-22-50
+    default_inference_model_dir: /home/rvl/collect_datasets_ws/models/14-58-45
     default_inference_env: fruits
     default_inference_task: pick_up_the_orange_and_place_it_in_the_basket
     default_inference_embedding_path: /home/rvl/collect_datasets_ws/Real_IL/task_embeddings/data_fruits.pkl
@@ -47,4 +47,4 @@ teleop_gui:
     realsense_enable_depth: false
     oakd_enable_depth: false
     default_hdf5_output_dir: /home/rvl/collect_datasets_ws/data
-    default_hdf5_filename: libero_demos.hdf5
+    default_hdf5_filename: nsy1.hdf5

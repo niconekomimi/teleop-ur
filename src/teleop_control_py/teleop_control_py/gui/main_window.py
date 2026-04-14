@@ -1,3 +1,4 @@
+from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
@@ -66,6 +67,7 @@ from .app_service import (
 )
 from .http_preview_worker import HttpPreviewWorker
 from .intent_controller import GuiIntentController, IntentResult
+from .preview_recording_worker import PreviewRecordingWorker
 from .runtime_facade import GuiRuntimeFacade
 from .widgets import CameraPreviewWindow, HDF5ViewerDialog
 
@@ -107,6 +109,8 @@ class TeleopMainWindow(QMainWindow):
         self._preview_api_active = False
         self._latest_inference_global_bgr = None
         self._latest_inference_wrist_bgr = None
+        self._preview_recording_worker = None
+        self._preview_recording_session_dir: Optional[Path] = None
         self.module_status_labels = {}
         self.hardware_status_labels = {}
         self.toolbar_runtime_label = None
@@ -144,6 +148,11 @@ class TeleopMainWindow(QMainWindow):
 
         try:
             self._stop_preview_api_worker()
+        except Exception:
+            pass
+
+        try:
+            self._stop_preview_recording(reason_label="程序退出")
         except Exception:
             pass
 
@@ -1670,7 +1679,7 @@ class TeleopMainWindow(QMainWindow):
         if hasattr(self, "vision_panel") and self.vision_panel is not None:
             self.vision_panel.update_record_stats(frames, time_str, realtime_fps)
         if self.preview_window is not None:
-            self.preview_window.update_record_stats(frames, time_str, realtime_fps)
+            self.preview_window.update_dataset_record_stats(frames, time_str, realtime_fps)
 
     def _persisted_home_joint_positions(self) -> List[float]:
         profile_name = self._selected_robot_profile()
@@ -2185,6 +2194,37 @@ class TeleopMainWindow(QMainWindow):
         output_dir = Path(self._selected_record_output_dir()).expanduser()
         filename = self._selected_record_filename()
         return str((output_dir / filename).resolve())
+
+    @staticmethod
+    def _normalize_preview_record_target(target: str) -> str:
+        normalized = str(target).strip().lower()
+        if normalized in {"global", "wrist", "both"}:
+            return normalized
+        return "both"
+
+    @staticmethod
+    def _normalize_preview_record_frame_mode(frame_mode: str) -> str:
+        normalized = str(frame_mode).strip().lower()
+        if normalized in {"source", "square"}:
+            return normalized
+        return "source"
+
+    def _preview_recordings_root(self) -> Path:
+        return (MODELS_ROOT.parent / "data" / "preview_recordings").resolve()
+
+    def _create_preview_recording_session_dir(self) -> Path:
+        root = self._preview_recordings_root()
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        session_dir = root / timestamp
+        suffix = 1
+        while session_dir.exists():
+            suffix += 1
+            session_dir = root / f"{timestamp}_{suffix:02d}"
+        return session_dir
+
+    def _preview_recording_running(self) -> bool:
+        worker = self._preview_recording_worker
+        return bool(worker is not None and worker.isRunning())
 
     def _default_mediapipe_topics(self) -> List[str]:
         profile = self._selected_mediapipe_camera_profile()
@@ -2771,6 +2811,8 @@ class TeleopMainWindow(QMainWindow):
         self.preview_api_worker = HttpPreviewWorker(self.COLLECTOR_PREVIEW_API_BASE_URL, fps=30.0)
         self.preview_api_worker.availability_signal.connect(self._on_preview_api_availability_changed)
         self.preview_api_worker.log_signal.connect(self.log)
+        self.preview_api_worker.global_image_signal.connect(self._on_collector_preview_global_frame)
+        self.preview_api_worker.wrist_image_signal.connect(self._on_collector_preview_wrist_frame)
         if self.vision_panel is not None:
             self.preview_api_worker.global_image_signal.connect(self.vision_panel.update_global_image)
             self.preview_api_worker.wrist_image_signal.connect(self.vision_panel.update_wrist_image)
@@ -2803,6 +2845,98 @@ class TeleopMainWindow(QMainWindow):
             if not available:
                 self.preview_window.clear_images()
 
+    def _push_preview_frame_to_recording(self, camera_name: str, frame) -> None:
+        worker = self._preview_recording_worker
+        if worker is None or not worker.isRunning() or frame is None:
+            return
+        worker.update_frame(camera_name, frame)
+
+    @Slot(object)
+    def _on_collector_preview_global_frame(self, frame) -> None:
+        if not self._collector_preview_api_should_run():
+            return
+        self._push_preview_frame_to_recording("global", frame)
+
+    @Slot(object)
+    def _on_collector_preview_wrist_frame(self, frame) -> None:
+        if not self._collector_preview_api_should_run():
+            return
+        self._push_preview_frame_to_recording("wrist", frame)
+
+    @Slot(str)
+    def _on_preview_recording_status(self, text: str) -> None:
+        if self.preview_window is not None:
+            self.preview_window.update_preview_recording_status(text)
+
+    @Slot(str)
+    def _on_preview_recording_error(self, message: str) -> None:
+        self.log(message)
+        if self.preview_window is not None:
+            self.preview_window.update_preview_recording_status(f"预览录屏: 失败 | {message}")
+            self.preview_window.set_preview_recording_state(False, output_dir=str(self._preview_recording_session_dir or ""))
+        QMessageBox.warning(self, "预览录屏失败", message)
+
+    @Slot(str)
+    def _on_preview_recording_stopped(self, output_dir: str) -> None:
+        normalized_dir = str(output_dir).strip()
+        worker = self.sender()
+        if worker is not None and worker is not self._preview_recording_worker:
+            return
+        self._preview_recording_worker = None
+        self._preview_recording_session_dir = None
+        if self.preview_window is not None:
+            self.preview_window.set_preview_recording_state(False, output_dir=normalized_dir)
+            if normalized_dir:
+                self.preview_window.update_preview_recording_status(f"预览录屏: 已停止 | 目录: {normalized_dir}")
+            else:
+                self.preview_window.update_preview_recording_status("预览录屏: 已停止")
+        if normalized_dir:
+            self.log(f"预览录屏已停止，文件保存在: {normalized_dir}")
+
+    def _start_preview_recording(self, target: str, frame_mode: str) -> None:
+        if self._preview_recording_worker is not None:
+            return
+        normalized_target = self._normalize_preview_record_target(target)
+        normalized_frame_mode = self._normalize_preview_record_frame_mode(frame_mode)
+        session_dir = self._create_preview_recording_session_dir()
+        worker = PreviewRecordingWorker(
+            session_dir,
+            target=normalized_target,
+            frame_mode=normalized_frame_mode,
+            fps=30.0,
+        )
+        worker.status_signal.connect(self._on_preview_recording_status)
+        worker.error_signal.connect(self._on_preview_recording_error)
+        worker.stopped_signal.connect(self._on_preview_recording_stopped)
+        self._preview_recording_worker = worker
+        self._preview_recording_session_dir = session_dir
+        if self.preview_window is not None:
+            self.preview_window.set_preview_recording_state(True, output_dir=str(session_dir))
+            self.preview_window.update_preview_recording_status("预览录屏: 录制中 | 等待画面...")
+        self.log(f"已开始预览录屏，目标={normalized_target}，尺寸={normalized_frame_mode}，输出目录: {session_dir}")
+        worker.start()
+
+    def _stop_preview_recording(self, *, reason_label: str = "手动停止") -> None:
+        worker = self._preview_recording_worker
+        if worker is None:
+            if self.preview_window is not None:
+                self.preview_window.set_preview_recording_state(False)
+            return
+        if self.preview_window is not None:
+            self.preview_window.set_preview_recording_state(False, output_dir=str(self._preview_recording_session_dir or ""))
+            self.preview_window.update_preview_recording_status(f"预览录屏: 停止中 | 原因: {reason_label}")
+        worker.stop()
+
+    @Slot(bool, str)
+    def _on_preview_record_toggle_requested(self, checked: bool, target: str) -> None:
+        if checked:
+            frame_mode = "source"
+            if self.preview_window is not None:
+                frame_mode = self.preview_window.selected_preview_record_frame_mode()
+            self._start_preview_recording(target, frame_mode)
+            return
+        self._stop_preview_recording(reason_label="用户停止")
+
     def _cache_inference_preview_frames(self, global_bgr, wrist_bgr) -> None:
         self._latest_inference_global_bgr = None if global_bgr is None else np.ascontiguousarray(global_bgr).copy()
         self._latest_inference_wrist_bgr = None if wrist_bgr is None else np.ascontiguousarray(wrist_bgr).copy()
@@ -2830,6 +2964,9 @@ class TeleopMainWindow(QMainWindow):
         self.log("已启动 ROS 监听器，用于给推理读取机器人状态。")
 
     def _sync_preview_pipeline(self) -> None:
+        inference_preview_active = self._inference_preview_should_render()
+        self.inference_service.set_preview_streaming(inference_preview_active)
+
         if self._collector_preview_api_should_run():
             self._start_preview_api_worker()
             source = "采集节点 API" if self._preview_api_active else "采集节点 API (连接中)"
@@ -2846,7 +2983,7 @@ class TeleopMainWindow(QMainWindow):
             return
 
         self._stop_preview_api_worker()
-        if self._inference_preview_should_render():
+        if inference_preview_active:
             if self.toolbar_preview_label is not None:
                 self.toolbar_preview_label.setText("监视器: 推理直连")
             if self.vision_panel is not None:
@@ -3850,6 +3987,9 @@ class TeleopMainWindow(QMainWindow):
     @Slot(object, object)
     def update_inference_preview(self, global_bgr, wrist_bgr) -> None:
         self._cache_inference_preview_frames(global_bgr, wrist_bgr)
+        if self._inference_preview_should_render():
+            self._push_preview_frame_to_recording("global", global_bgr)
+            self._push_preview_frame_to_recording("wrist", wrist_bgr)
         self._render_inference_preview_frames()
 
     @Slot(str)
@@ -4006,6 +4146,7 @@ class TeleopMainWindow(QMainWindow):
 
     @Slot(int)
     def _on_preview_window_finished(self, _result: int):
+        self._stop_preview_recording(reason_label="关闭预览窗口")
         if self.preview_window is not None:
             self.preview_window.set_preview_source("已关闭")
             self.preview_window.clear_images()
@@ -4020,9 +4161,11 @@ class TeleopMainWindow(QMainWindow):
         if self.preview_window is None:
             self.preview_window = CameraPreviewWindow(self)
             self.preview_window.finished.connect(self._on_preview_window_finished)
+            self.preview_window.preview_record_toggle_requested.connect(self._on_preview_record_toggle_requested)
             self._preview_window_api_connected = False
         if not self.app_service.is_recording():
-            self.preview_window.reset_record_stats()
+            self.preview_window.reset_dataset_record_stats()
+        self.preview_window.set_preview_recording_state(self._preview_recording_running(), output_dir=str(self._preview_recording_session_dir or ""))
 
         if self.preview_api_worker is not None and not self._preview_window_api_connected:
             self.preview_api_worker.global_image_signal.connect(self.preview_window.update_global_image)
