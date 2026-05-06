@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSpinBox,
     QTabWidget,
     QTextEdit,
     QToolBar,
@@ -510,79 +511,114 @@ class TeleopMainWindow(QMainWindow):
         inference_group.setStyleSheet(self._section_style)
         inference_layout = QGridLayout()
 
-        inference_layout.addWidget(QLabel("模型文件夹:"), 0, 0)
+        self.lbl_inference_backend = QLabel("推理后端:")
+        inference_layout.addWidget(self.lbl_inference_backend, 0, 0)
+        self.inference_backend_combo = QComboBox()
+        self.inference_backend_combo.addItem("real_il (本地)", "real_il")
+        self.inference_backend_combo.addItem("openpi remote (远端)", "openpi_remote")
+        inference_layout.addWidget(self.inference_backend_combo, 0, 1)
+
+        self.lbl_openpi_host = QLabel("OpenPI Host:")
+        inference_layout.addWidget(self.lbl_openpi_host, 0, 2)
+        self.inference_openpi_host_input = QLineEdit(self.gui_settings.default_openpi_host)
+        self.inference_openpi_host_input.setPlaceholderText("例如: 127.0.0.1")
+        inference_layout.addWidget(self.inference_openpi_host_input, 0, 3)
+
+        self.lbl_openpi_port = QLabel("端口:")
+        inference_layout.addWidget(self.lbl_openpi_port, 0, 4)
+        self.inference_openpi_port_spin = QSpinBox()
+        self.inference_openpi_port_spin.setRange(1, 65535)
+        self.inference_openpi_port_spin.setValue(int(self.gui_settings.default_openpi_port))
+        inference_layout.addWidget(self.inference_openpi_port_spin, 0, 5)
+
+        self.lbl_openpi_prompt = QLabel("Prompt:")
+        inference_layout.addWidget(self.lbl_openpi_prompt, 1, 0)
+        self.inference_openpi_prompt_input = QLineEdit(self.gui_settings.default_openpi_prompt)
+        self.inference_openpi_prompt_input.setPlaceholderText("例如: pick up the object")
+        inference_layout.addWidget(self.inference_openpi_prompt_input, 1, 1, 1, 5)
+
+        self.lbl_inference_model_dir = QLabel("模型文件夹:")
+        inference_layout.addWidget(self.lbl_inference_model_dir, 2, 0)
         self.inference_model_dir_input = QLineEdit()
         self.inference_model_dir_input.setPlaceholderText("例如: models/ddim_dec_transformer")
         self.inference_model_dir_input.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        inference_layout.addWidget(self.inference_model_dir_input, 0, 1, 1, 3)
+        inference_layout.addWidget(self.inference_model_dir_input, 2, 1, 1, 3)
 
         self.btn_browse_inference_model = QPushButton("选择")
         self.btn_browse_inference_model.setMinimumHeight(button_height)
         self.btn_browse_inference_model.clicked.connect(self.choose_inference_model_dir)
-        inference_layout.addWidget(self.btn_browse_inference_model, 0, 4)
+        inference_layout.addWidget(self.btn_browse_inference_model, 2, 4)
 
         self.btn_refresh_inference_options = QPushButton("刷新")
         self.btn_refresh_inference_options.setMinimumHeight(button_height)
         self.btn_refresh_inference_options.clicked.connect(self.refresh_inference_options)
-        inference_layout.addWidget(self.btn_refresh_inference_options, 0, 5)
+        inference_layout.addWidget(self.btn_refresh_inference_options, 2, 5)
 
-        inference_layout.addWidget(QLabel("任务环境:"), 1, 0)
+        self.lbl_inference_env = QLabel("任务环境:")
+        inference_layout.addWidget(self.lbl_inference_env, 3, 0)
         self.inference_env_combo = QComboBox()
-        inference_layout.addWidget(self.inference_env_combo, 1, 1, 1, 2)
+        inference_layout.addWidget(self.inference_env_combo, 3, 1, 1, 2)
 
-        inference_layout.addWidget(QLabel("任务名称:"), 1, 3)
+        self.lbl_inference_task = QLabel("任务名称:")
+        inference_layout.addWidget(self.lbl_inference_task, 3, 3)
         self.inference_task_combo = QComboBox()
-        inference_layout.addWidget(self.inference_task_combo, 1, 4, 1, 2)
+        inference_layout.addWidget(self.inference_task_combo, 3, 4, 1, 2)
 
-        inference_layout.addWidget(QLabel("Embeddings:"), 2, 0)
+        self.lbl_inference_embedding = QLabel("Embeddings:")
+        inference_layout.addWidget(self.lbl_inference_embedding, 4, 0)
         self.inference_embedding_input = QLineEdit()
         self.inference_embedding_input.setReadOnly(True)
         self.inference_embedding_input.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        inference_layout.addWidget(self.inference_embedding_input, 2, 1, 1, 3)
+        inference_layout.addWidget(self.inference_embedding_input, 4, 1, 1, 3)
 
         self.btn_browse_inference_embedding = QPushButton("手动选择")
         self.btn_browse_inference_embedding.setMinimumHeight(button_height)
         self.btn_browse_inference_embedding.clicked.connect(self.choose_inference_embedding_path)
-        inference_layout.addWidget(self.btn_browse_inference_embedding, 2, 4)
+        inference_layout.addWidget(self.btn_browse_inference_embedding, 4, 4)
 
         self.btn_auto_match_embedding = QPushButton("自动匹配")
         self.btn_auto_match_embedding.setMinimumHeight(button_height)
         self.btn_auto_match_embedding.clicked.connect(self.update_inference_embedding_path)
-        inference_layout.addWidget(self.btn_auto_match_embedding, 2, 5)
+        inference_layout.addWidget(self.btn_auto_match_embedding, 4, 5)
 
-        inference_layout.addWidget(QLabel("全局相机:"), 3, 0)
+        self.lbl_inference_global_camera = QLabel("全局相机:")
+        inference_layout.addWidget(self.lbl_inference_global_camera, 5, 0)
         self.inference_global_camera_combo = QComboBox()
-        inference_layout.addWidget(self.inference_global_camera_combo, 3, 1)
+        inference_layout.addWidget(self.inference_global_camera_combo, 5, 1)
 
-        inference_layout.addWidget(QLabel("手部相机:"), 3, 2)
+        self.lbl_inference_wrist_camera = QLabel("手部相机:")
+        inference_layout.addWidget(self.lbl_inference_wrist_camera, 5, 2)
         self.inference_wrist_camera_combo = QComboBox()
-        inference_layout.addWidget(self.inference_wrist_camera_combo, 3, 3)
+        inference_layout.addWidget(self.inference_wrist_camera_combo, 5, 3)
 
-        inference_layout.addWidget(QLabel("运行设备:"), 3, 4)
+        self.lbl_inference_device = QLabel("运行设备:")
+        inference_layout.addWidget(self.lbl_inference_device, 5, 4)
         self.inference_device_combo = QComboBox()
         self.inference_device_combo.addItem("auto", "auto")
         self.inference_device_combo.addItem("cuda", "cuda")
         self.inference_device_combo.addItem("cpu", "cpu")
         self.inference_device_combo.setCurrentIndex(max(0, self.inference_device_combo.findData("cuda")))
-        inference_layout.addWidget(self.inference_device_combo, 3, 5)
+        inference_layout.addWidget(self.inference_device_combo, 5, 5)
 
-        inference_layout.addWidget(QLabel("高层动作频率(Hz):"), 4, 0)
+        self.lbl_inference_hz = QLabel("高层动作频率(Hz):")
+        inference_layout.addWidget(self.lbl_inference_hz, 6, 0)
         self.inference_hz_spin = QDoubleSpinBox()
-        self.inference_hz_spin.setRange(0.2, 30.0)
+        self.inference_hz_spin.setRange(0.2, 50.0)
         self.inference_hz_spin.setDecimals(1)
         self.inference_hz_spin.setSingleStep(0.5)
         self.inference_hz_spin.setValue(10.0)
         self.inference_hz_spin.setToolTip("控制高层动作输出频率；不等同于完整重规划频率。实际重规划频率约为该值 / replan_every。")
         self.inference_hz_spin.setFixedHeight(emphasis_spin_height)
-        inference_layout.addWidget(self.inference_hz_spin, 4, 1)
+        inference_layout.addWidget(self.inference_hz_spin, 6, 1)
 
-        inference_layout.addWidget(QLabel("状态:"), 4, 2)
+        self.lbl_inference_runtime_status = QLabel("状态:")
+        inference_layout.addWidget(self.lbl_inference_runtime_status, 6, 2)
         self.lbl_inference_status = QLabel("未启动")
         self.lbl_inference_status.setWordWrap(True)
         self.lbl_inference_status.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.lbl_inference_status.setMaximumWidth(260)
         self.lbl_inference_status.setStyleSheet("font-weight: bold; color: #6c757d;")
-        inference_layout.addWidget(self.lbl_inference_status, 4, 3, 1, 3)
+        inference_layout.addWidget(self.lbl_inference_status, 6, 3, 1, 3)
 
         self.btn_inference = QPushButton("启动推理")
         self.btn_inference.setFixedHeight(button_height)
@@ -592,14 +628,14 @@ class TeleopMainWindow(QMainWindow):
         )
         self.btn_inference.setCheckable(True)
         self.btn_inference.clicked.connect(self.toggle_inference)
-        inference_layout.addWidget(self.btn_inference, 5, 0)
+        inference_layout.addWidget(self.btn_inference, 7, 0)
 
         self.btn_execute_inference = QPushButton("开始执行任务")
         self.btn_execute_inference.setFixedHeight(button_height)
         self.btn_execute_inference.setCheckable(True)
         self.btn_execute_inference.setEnabled(False)
         self.btn_execute_inference.clicked.connect(self.toggle_inference_execution)
-        inference_layout.addWidget(self.btn_execute_inference, 5, 1)
+        inference_layout.addWidget(self.btn_execute_inference, 7, 1)
 
         self.btn_inference_estop = QPushButton("急停")
         self.btn_inference_estop.setEnabled(False)
@@ -609,18 +645,19 @@ class TeleopMainWindow(QMainWindow):
             "QPushButton:disabled { background-color: #f3d1d4; color: #a45a5f; }"
         )
         self.btn_inference_estop.clicked.connect(self.emergency_stop_inference_execution)
-        inference_layout.addWidget(self.btn_inference_estop, 5, 2)
+        inference_layout.addWidget(self.btn_inference_estop, 7, 2)
 
-        inference_layout.addWidget(QLabel("执行:"), 5, 3)
+        self.lbl_inference_execute = QLabel("执行:")
+        inference_layout.addWidget(self.lbl_inference_execute, 7, 3)
         self.lbl_inference_execute_status = QLabel("未使能")
         self.lbl_inference_execute_status.setStyleSheet("font-weight: bold; color: #6c757d;")
-        inference_layout.addWidget(self.lbl_inference_execute_status, 5, 4, 1, 2)
+        inference_layout.addWidget(self.lbl_inference_execute_status, 7, 4, 1, 2)
 
         self.chk_collect_inference_logs = QCheckBox("记录执行段动作日志")
         self.chk_collect_inference_logs.setChecked(bool(self.gui_settings.collect_inference_action_logs))
         self.chk_collect_inference_logs.setToolTip("勾选后，仅在点击“开始执行任务”期间保存高层动作日志。")
         self.chk_collect_inference_logs.toggled.connect(self._on_collect_inference_logs_toggled)
-        inference_layout.addWidget(self.chk_collect_inference_logs, 6, 0, 1, 3)
+        inference_layout.addWidget(self.chk_collect_inference_logs, 8, 0, 1, 3)
 
         self.inference_hint_label = QLabel(
             "说明: 直接调用 Real_IL 的 RealRobotPolicy。这里的频率表示高层动作输出频率，不等同于完整重规划频率；GUI 负责相机采集、预览发布、推理调度和动作下发。勾选上方开关后，点击开始执行任务会把执行期间的高层动作保存到 data/inference_action_logs。"
@@ -629,13 +666,40 @@ class TeleopMainWindow(QMainWindow):
         self.inference_hint_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.inference_hint_label.setStyleSheet("color: #555; font-size: 12px;")
         self.inference_hint_label.setVisible(False)
+        inference_layout.addWidget(self.inference_hint_label, 9, 0, 1, 6)
 
-        inference_layout.addWidget(QLabel("动作输出:"), 7, 0)
+        self.lbl_inference_action_output = QLabel("动作输出:")
+        inference_layout.addWidget(self.lbl_inference_action_output, 10, 0)
         self.inference_action_output = QTextEdit()
         self.inference_action_output.setReadOnly(True)
-        self.inference_action_output.setMinimumHeight(120)
-        self.inference_action_output.setMaximumHeight(140)
-        inference_layout.addWidget(self.inference_action_output, 8, 0, 1, 6)
+        self.inference_action_output.setMinimumHeight(30)
+        self.inference_action_output.setMaximumHeight(50)
+        inference_layout.addWidget(self.inference_action_output, 11, 0, 1, 6)
+
+        self._real_il_inference_widgets = [
+            self.lbl_inference_model_dir,
+            self.inference_model_dir_input,
+            self.btn_browse_inference_model,
+            self.btn_refresh_inference_options,
+            self.lbl_inference_env,
+            self.inference_env_combo,
+            self.lbl_inference_task,
+            self.inference_task_combo,
+            self.lbl_inference_embedding,
+            self.inference_embedding_input,
+            self.btn_browse_inference_embedding,
+            self.btn_auto_match_embedding,
+            self.lbl_inference_device,
+            self.inference_device_combo,
+        ]
+        self._openpi_inference_widgets = [
+            self.lbl_openpi_host,
+            self.inference_openpi_host_input,
+            self.lbl_openpi_port,
+            self.inference_openpi_port_spin,
+            self.lbl_openpi_prompt,
+            self.inference_openpi_prompt_input,
+        ]
 
         inference_group.setLayout(inference_layout)
         right_layout.addWidget(inference_group)
@@ -654,6 +718,7 @@ class TeleopMainWindow(QMainWindow):
         self.mediapipe_topic_combo.currentTextChanged.connect(self._on_mediapipe_topic_changed)
         self.global_camera_source_combo.currentIndexChanged.connect(self._on_collector_camera_selection_changed)
         self.wrist_camera_source_combo.currentIndexChanged.connect(self._on_collector_camera_selection_changed)
+        self.inference_backend_combo.currentIndexChanged.connect(self._on_inference_backend_changed)
         self.inference_global_camera_combo.currentIndexChanged.connect(self._on_inference_camera_selection_changed)
         self.inference_wrist_camera_combo.currentIndexChanged.connect(self._on_inference_camera_selection_changed)
         self.inference_env_combo.currentIndexChanged.connect(self.refresh_inference_task_names)
@@ -664,6 +729,7 @@ class TeleopMainWindow(QMainWindow):
         self.ur_type_input.textChanged.connect(self._refresh_runtime_status)
         self.refresh_inference_options()
         self._restore_persisted_gui_state()
+        self._update_inference_backend_ui()
         self._connect_gui_settings_persistence()
         self._update_input_hint()
         self._update_input_mode_widgets()
@@ -1375,7 +1441,7 @@ class TeleopMainWindow(QMainWindow):
 
         inference_layout.addWidget(QLabel("高层动作频率(Hz):"), 4, 0)
         self.inference_hz_spin = QDoubleSpinBox()
-        self.inference_hz_spin.setRange(0.2, 30.0)
+        self.inference_hz_spin.setRange(0.2, 50.0)
         self.inference_hz_spin.setDecimals(1)
         self.inference_hz_spin.setSingleStep(0.5)
         self.inference_hz_spin.setValue(10.0)
@@ -1555,7 +1621,7 @@ class TeleopMainWindow(QMainWindow):
 
         inference_layout.addWidget(QLabel("高层动作频率(Hz):"), 4, 0)
         self.inference_hz_spin = QDoubleSpinBox()
-        self.inference_hz_spin.setRange(0.2, 30.0)
+        self.inference_hz_spin.setRange(0.2, 50.0)
         self.inference_hz_spin.setDecimals(1)
         self.inference_hz_spin.setSingleStep(0.5)
         self.inference_hz_spin.setValue(10.0)
@@ -1766,25 +1832,34 @@ class TeleopMainWindow(QMainWindow):
     def _current_inference_launch_config(
         self,
         *,
-        checkpoint_dir: Path,
+        checkpoint_dir: Optional[Path],
         task_name: str,
-        embedding_path: Path,
+        embedding_path: Optional[Path],
         global_source: str,
         wrist_source: str,
     ) -> InferenceLaunchConfig:
+        backend = self._selected_inference_backend()
         return InferenceLaunchConfig(
-            checkpoint_dir=str(checkpoint_dir),
+            checkpoint_dir=str(checkpoint_dir) if checkpoint_dir is not None else "",
             task_name=task_name,
-            task_embedding_path=str(embedding_path),
+            task_embedding_path=str(embedding_path) if embedding_path is not None else "",
             global_camera_source=global_source,
             wrist_camera_source=wrist_source,
             loop_hz=float(self.inference_hz_spin.value()),
-            device=self._selected_inference_device(),
-            state_provider=self._current_robot_state_for_inference,
+            device=None if backend == "openpi_remote" else self._selected_inference_device(),
+            state_provider=(
+                self._current_robot_state_dict_for_inference
+                if backend == "openpi_remote"
+                else self._current_robot_state_for_inference
+            ),
             global_camera_serial_number=self._selected_inference_camera_serial_numbers()[0],
             wrist_camera_serial_number=self._selected_inference_camera_serial_numbers()[1],
             global_camera_enable_depth=self._camera_enable_depth(global_source),
             wrist_camera_enable_depth=self._camera_enable_depth(wrist_source),
+            backend=backend,
+            prompt_provider=self._selected_openpi_prompt if backend == "openpi_remote" else None,
+            openpi_host=self._selected_openpi_host(),
+            openpi_port=self._selected_openpi_port(),
         )
 
     def _camera_enable_depth(self, camera_source: str) -> bool:
@@ -2314,6 +2389,11 @@ class TeleopMainWindow(QMainWindow):
         value = self.camera_driver_combo.currentData()
         return str(value).strip().lower() if value is not None else self.gui_settings.default_camera_driver
 
+    def _selected_inference_backend(self) -> str:
+        value = self.inference_backend_combo.currentData()
+        normalized = str(value).strip().lower() if value is not None else "real_il"
+        return normalized or "real_il"
+
     def _selected_inference_model_dir(self) -> str:
         return self.inference_model_dir_input.text().strip()
 
@@ -2328,6 +2408,15 @@ class TeleopMainWindow(QMainWindow):
         if value is None:
             value = self.inference_task_combo.currentText()
         return str(value).strip()
+
+    def _selected_openpi_host(self) -> str:
+        return self.inference_openpi_host_input.text().strip() or "127.0.0.1"
+
+    def _selected_openpi_port(self) -> int:
+        return int(self.inference_openpi_port_spin.value())
+
+    def _selected_openpi_prompt(self) -> str:
+        return self.inference_openpi_prompt_input.text().strip()
 
     def _selected_inference_device(self) -> Optional[str]:
         value = self.inference_device_combo.currentData()
@@ -2521,6 +2610,38 @@ class TeleopMainWindow(QMainWindow):
         self.inference_model_dir_input.setToolTip(model_dir)
         self.inference_model_dir_input.setCursorPosition(0)
 
+    def _update_inference_backend_ui(self) -> None:
+        backend = self._selected_inference_backend()
+        use_openpi = backend == "openpi_remote"
+
+        for widget in self._real_il_inference_widgets:
+            widget.setEnabled(not use_openpi)
+
+        for widget in self._openpi_inference_widgets:
+            widget.setEnabled(use_openpi)
+
+        if use_openpi:
+            self.inference_hint_label.setText(
+                "说明: openpi remote 通过 websocket 连接远端策略服务；本地项目继续负责相机采集、机器人状态读取、预览和动作下发。"
+                " 这里不再依赖 Real_IL 的 env/task/embedding，远端当前可直接吃 UR5 的图像、关节、夹爪和 prompt。"
+            )
+            self.inference_hz_spin.setToolTip(
+                "openpi 动作块会按当前高层动作频率开环执行。UR5/UR5e 数据通常建议从 20 Hz 左右开始调。"
+            )
+        else:
+            self.inference_hint_label.setText(
+                "说明: 直接调用 Real_IL 的 RealRobotPolicy。这里的频率表示高层动作输出频率，不等同于完整重规划频率；"
+                "GUI 负责相机采集、预览发布、推理调度和动作下发。勾选上方开关后，点击开始执行任务会把执行期间的高层动作保存到 data/inference_action_logs。"
+            )
+            self.inference_hz_spin.setToolTip(
+                "控制高层动作输出频率；不等同于完整重规划频率。实际重规划频率约为该值 / replan_every。"
+            )
+
+    @Slot()
+    def _on_inference_backend_changed(self) -> None:
+        self._update_inference_backend_ui()
+        self._refresh_runtime_status()
+
     def choose_inference_model_dir(self) -> None:
         current_dir = self._selected_inference_model_dir() or str(MODELS_ROOT.resolve())
         selected_dir = QFileDialog.getExistingDirectory(self, "选择模型文件夹", current_dir)
@@ -2550,6 +2671,8 @@ class TeleopMainWindow(QMainWindow):
         self.log(f"推理 embedding 文件已手动指定为: {normalized_path}")
 
     def refresh_inference_options(self) -> None:
+        if self._selected_inference_backend() != "real_il":
+            return
         checkpoint_dirs = discover_checkpoint_dirs()
         current_model_dir = self._selected_inference_model_dir()
         preferred_model_dir = current_model_dir
@@ -2611,6 +2734,8 @@ class TeleopMainWindow(QMainWindow):
         self._notify_running_inference_goal_changed(log_request=True)
 
     def _notify_running_inference_goal_changed(self, *_args, log_request: bool = False) -> None:
+        if self._selected_inference_backend() != "real_il":
+            return
         if not self.inference_service.is_running():
             return
 
@@ -2742,10 +2867,29 @@ class TeleopMainWindow(QMainWindow):
     def _build_inference_action_log_kwargs(self) -> Optional[dict[str, object]]:
         if not self._should_collect_inference_action_logs():
             return None
+        backend = self._selected_inference_backend()
         model_dir = self._selected_inference_model_dir()
         task_name = self._selected_inference_task_name()
         embedding_path = self.inference_embedding_input.text().strip()
         global_source, wrist_source = self._selected_inference_camera_sources()
+        if backend == "openpi_remote":
+            prompt = self._selected_openpi_prompt()
+            return {
+                "checkpoint_dir": "",
+                "task_name": prompt or "openpi_remote",
+                "task_embedding_path": "",
+                "loop_hz": float(self.inference_hz_spin.value()),
+                "global_camera_source": global_source,
+                "wrist_camera_source": wrist_source,
+                "device": "remote",
+                "control_hz": float(self._current_ros_worker_config().inference_control_hz),
+                "backend_name": "openpi_remote",
+                "metadata_overrides": {
+                    "openpi_host": self._selected_openpi_host(),
+                    "openpi_port": self._selected_openpi_port(),
+                    "openpi_prompt": prompt,
+                },
+            }
         return {
             "checkpoint_dir": str(Path(model_dir).expanduser().resolve()) if model_dir else "",
             "task_name": task_name,
@@ -2755,6 +2899,7 @@ class TeleopMainWindow(QMainWindow):
             "wrist_camera_source": wrist_source,
             "device": str(self._selected_inference_device() or "auto"),
             "control_hz": float(self._current_ros_worker_config().inference_control_hz),
+            "backend_name": "real_il",
         }
 
     def _queue_inference_execution_start(self) -> None:
@@ -3009,6 +3154,9 @@ class TeleopMainWindow(QMainWindow):
     def _current_robot_state_for_inference(self) -> Optional[np.ndarray]:
         return self.app_service.current_robot_state_vector()
 
+    def _current_robot_state_dict_for_inference(self) -> Optional[dict]:
+        return self.app_service.current_robot_state()
+
     def _should_collect_inference_action_logs(self) -> bool:
         checkbox = getattr(self, "chk_collect_inference_logs", None)
         if checkbox is None:
@@ -3028,6 +3176,17 @@ class TeleopMainWindow(QMainWindow):
     def _restore_persisted_gui_state(self) -> None:
         self._suspend_gui_settings_persist = True
         try:
+            backend_name = str(self.gui_settings.default_inference_backend).strip().lower() or "real_il"
+            backend_index = self.inference_backend_combo.findData(backend_name)
+            if backend_index < 0:
+                backend_index = self.inference_backend_combo.findData("real_il")
+            if backend_index >= 0:
+                self.inference_backend_combo.setCurrentIndex(backend_index)
+
+            self.inference_openpi_host_input.setText(self.gui_settings.default_openpi_host)
+            self.inference_openpi_port_spin.setValue(int(self.gui_settings.default_openpi_port))
+            self.inference_openpi_prompt_input.setText(self.gui_settings.default_openpi_prompt)
+
             model_dir = self._normalize_settings_path(self.gui_settings.default_inference_model_dir)
             if model_dir:
                 self.inference_model_dir_input.setText(model_dir)
@@ -3068,6 +3227,7 @@ class TeleopMainWindow(QMainWindow):
                     task_index = self.inference_task_combo.findText(preferred_task)
                 if task_index >= 0:
                     self.inference_task_combo.setCurrentIndex(task_index)
+            self._update_inference_backend_ui()
         finally:
             self._suspend_gui_settings_persist = False
 
@@ -3087,6 +3247,10 @@ class TeleopMainWindow(QMainWindow):
         self.record_name_input.textChanged.connect(self._schedule_gui_settings_persist)
         self.global_camera_source_combo.currentIndexChanged.connect(self._schedule_gui_settings_persist)
         self.wrist_camera_source_combo.currentIndexChanged.connect(self._schedule_gui_settings_persist)
+        self.inference_backend_combo.currentIndexChanged.connect(self._schedule_gui_settings_persist)
+        self.inference_openpi_host_input.textChanged.connect(self._schedule_gui_settings_persist)
+        self.inference_openpi_port_spin.valueChanged.connect(self._schedule_gui_settings_persist)
+        self.inference_openpi_prompt_input.textChanged.connect(self._schedule_gui_settings_persist)
         self.inference_model_dir_input.textChanged.connect(self._schedule_gui_settings_persist)
         self.inference_env_combo.currentIndexChanged.connect(self._schedule_gui_settings_persist)
         self.inference_task_combo.currentIndexChanged.connect(self._schedule_gui_settings_persist)
@@ -3172,6 +3336,10 @@ class TeleopMainWindow(QMainWindow):
             "default_camera_driver": self._selected_camera_driver(),
             "default_hdf5_output_dir": self._normalize_settings_path(self._selected_record_output_dir()),
             "default_hdf5_filename": self._selected_record_filename(),
+            "default_inference_backend": self._selected_inference_backend(),
+            "default_openpi_host": self._selected_openpi_host(),
+            "default_openpi_port": int(self._selected_openpi_port()),
+            "default_openpi_prompt": self._selected_openpi_prompt(),
             "default_inference_model_dir": self._normalize_settings_path(self._selected_inference_model_dir()),
             "default_inference_env": self._selected_inference_env(),
             "default_inference_task": self._selected_inference_task_name(),
@@ -3779,44 +3947,62 @@ class TeleopMainWindow(QMainWindow):
 
     def toggle_inference(self, checked) -> None:
         if checked:
-            model_dir = self._selected_inference_model_dir()
-            if not model_dir:
-                QMessageBox.warning(self, "模型缺失", "请先选择模型文件夹。")
-                self._set_inference_button_running(False)
-                return
+            backend = self._selected_inference_backend()
+            checkpoint_dir: Optional[Path] = None
+            embedding_path: Optional[Path] = None
+            task_name = ""
 
-            checkpoint_dir = Path(model_dir).expanduser().resolve()
-            if not checkpoint_dir.is_dir() or not (checkpoint_dir / "last_model.pth").exists():
-                QMessageBox.warning(self, "模型缺失", "所选目录不包含 last_model.pth。")
-                self._set_inference_button_running(False)
-                return
+            if backend == "openpi_remote":
+                openpi_host = self._selected_openpi_host()
+                openpi_prompt = self._selected_openpi_prompt()
+                if not openpi_host:
+                    QMessageBox.warning(self, "远端地址缺失", "请先填写 openpi 远端 Host。")
+                    self._set_inference_button_running(False)
+                    return
+                if not openpi_prompt:
+                    QMessageBox.warning(self, "Prompt 缺失", "当前 openpi 远端模式需要 prompt。")
+                    self._set_inference_button_running(False)
+                    return
+                task_name = openpi_prompt
+            else:
+                model_dir = self._selected_inference_model_dir()
+                if not model_dir:
+                    QMessageBox.warning(self, "模型缺失", "请先选择模型文件夹。")
+                    self._set_inference_button_running(False)
+                    return
 
-            task_name = self._selected_inference_task_name()
-            if not task_name:
-                QMessageBox.warning(self, "任务缺失", "请先选择任务名称。")
-                self._set_inference_button_running(False)
-                return
+                checkpoint_dir = Path(model_dir).expanduser().resolve()
+                if not checkpoint_dir.is_dir() or not (checkpoint_dir / "last_model.pth").exists():
+                    QMessageBox.warning(self, "模型缺失", "所选目录不包含 last_model.pth。")
+                    self._set_inference_button_running(False)
+                    return
 
-            embedding_path_text = self.inference_embedding_input.text().strip()
-            if not embedding_path_text:
-                QMessageBox.warning(self, "Embedding 缺失", "当前未匹配到 task embedding 文件。")
-                self._set_inference_button_running(False)
-                return
+                task_name = self._selected_inference_task_name()
+                if not task_name:
+                    QMessageBox.warning(self, "任务缺失", "请先选择任务名称。")
+                    self._set_inference_button_running(False)
+                    return
 
-            embedding_path = Path(embedding_path_text).expanduser().resolve()
-            if not embedding_path.is_file():
-                QMessageBox.warning(self, "Embedding 缺失", "当前 embedding 文件不存在。")
-                self._set_inference_button_running(False)
-                return
+                embedding_path_text = self.inference_embedding_input.text().strip()
+                if not embedding_path_text:
+                    QMessageBox.warning(self, "Embedding 缺失", "当前未匹配到 task embedding 文件。")
+                    self._set_inference_button_running(False)
+                    return
 
-            if task_name not in load_embedding_keys(embedding_path):
-                QMessageBox.warning(
-                    self,
-                    "Embedding 不匹配",
-                    f"任务 `{task_name}` 不在 embedding 文件中:\n{embedding_path}",
-                )
-                self._set_inference_button_running(False)
-                return
+                embedding_path = Path(embedding_path_text).expanduser().resolve()
+                if not embedding_path.is_file():
+                    QMessageBox.warning(self, "Embedding 缺失", "当前 embedding 文件不存在。")
+                    self._set_inference_button_running(False)
+                    return
+
+                if task_name not in load_embedding_keys(embedding_path):
+                    QMessageBox.warning(
+                        self,
+                        "Embedding 不匹配",
+                        f"任务 `{task_name}` 不在 embedding 文件中:\n{embedding_path}",
+                    )
+                    self._set_inference_button_running(False)
+                    return
 
             global_source, wrist_source = self._selected_inference_camera_sources()
             global_serial, wrist_serial = self._selected_inference_camera_serial_numbers()

@@ -88,3 +88,17 @@ ros2 launch teleop_control_py control_system.launch.py \
 ros2 launch teleop_control_py quest3_webxr_bridge.launch.py
 ros2 launch teleop_control_py teleop_control.launch.py input_type:=quest3
 ```
+
+
+pi0
+```bash
+# 安装pi0客户端
+git clone https://github.com/Physical-Intelligence/openpi
+cd /home/rvl/collect_datasets_ws/openpi/packages/openpi-client
+python3 -m pip install -e .
+
+#端口转发
+ssh -N -p 8000 -L 18000:127.0.0.1:8000 ubuntu@10.99.16.20
+
+
+```

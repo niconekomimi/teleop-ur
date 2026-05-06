@@ -42,11 +42,15 @@ class GuiSettings:
     default_inference_wrist_camera_model: str
     default_inference_wrist_camera_serial_number: str
     default_inference_model_dir: str
+    default_inference_backend: str
     default_inference_env: str
     default_inference_task: str
     default_inference_embedding_path: str
     default_inference_device: str
     default_inference_hz: float
+    default_openpi_host: str
+    default_openpi_port: int
+    default_openpi_prompt: str
     collect_inference_action_logs: bool
     camera_driver_options: List[str]
     default_camera_driver: str
@@ -162,6 +166,12 @@ def load_gui_settings(current_file: str | Path) -> GuiSettings:
             return _as_bool(raw.get(key), default)
         return default
 
+    def _as_int(value: object, default: int) -> int:
+        try:
+            return int(value)
+        except Exception:
+            return int(default)
+
     default_global_camera_source = str(raw.get("default_global_camera_source", "realsense")).strip().lower() or "realsense"
     default_wrist_camera_source = str(raw.get("default_wrist_camera_source", "oakd")).strip().lower() or "oakd"
     default_mediapipe_camera = str(raw.get("default_mediapipe_camera", "d435")).strip().lower() or "d435"
@@ -267,11 +277,15 @@ def load_gui_settings(current_file: str | Path) -> GuiSettings:
             )
         ),
         default_inference_model_dir=str(raw.get("default_inference_model_dir", "")),
+        default_inference_backend=str(raw.get("default_inference_backend", "real_il")).strip().lower() or "real_il",
         default_inference_env=str(raw.get("default_inference_env", "")),
         default_inference_task=str(raw.get("default_inference_task", "")),
         default_inference_embedding_path=str(raw.get("default_inference_embedding_path", "")),
         default_inference_device=str(raw.get("default_inference_device", "cuda")).strip().lower() or "cuda",
         default_inference_hz=float(raw.get("default_inference_hz", 10.0)),
+        default_openpi_host=str(raw.get("default_openpi_host", "127.0.0.1")).strip() or "127.0.0.1",
+        default_openpi_port=_as_int(raw.get("default_openpi_port", 18000), 18000),
+        default_openpi_prompt=str(raw.get("default_openpi_prompt", "")).strip(),
         collect_inference_action_logs=_as_bool(raw.get("collect_inference_action_logs", False), False),
         camera_driver_options=[str(v) for v in raw.get("camera_driver_options", ["realsense", "oakd"])],
         default_camera_driver=str(raw.get("default_camera_driver", "realsense")),

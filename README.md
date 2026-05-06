@@ -4,109 +4,54 @@
 
 [![【模仿学习】自己搭建的机器人模仿学习架构](https://i1.hdslb.com/bfs/archive/1d983e799dbbca97152156ce0755d5a8ef2fb6ce.jpg)](https://www.bilibili.com/video/BV13iQuB3E5L/)
 
-> 视频演示：点击封面直达 B 站
+> 视频演示：点击封面查看 B 站演示。
 
-面向真实机械臂的遥操作、数据采集与在线推理工作区。当前主使用方式是通过 GUI 统一启动机械臂驱动、遥操作系统、采集节点和推理链路。
+面向真实机械臂的 ROS 2 遥操作、数据采集与在线推理工作区。项目以 GUI 为主入口，围绕 UR5 + MoveIt Servo 控制链路组织机器人驱动、人工遥操作、HDF5 示教录制、预览和模型推理执行。
 
-当前代码的真实实现说明见：
+## 功能概览
 
-- [docs/PROJECT_ANALYSIS.md](docs/PROJECT_ANALYSIS.md)
-- [docs/current_control_behavior_spec_v0.1.md](docs/current_control_behavior_spec_v0.1.md)
+- 通过 GUI 启动和管理机械臂驱动、遥操作、采集和推理流程
+- 支持 `joy`、`mediapipe`、`quest3` 三类输入后端
+- 支持 `robotiq` 和 `qbsofthand` 夹爪配置
+- 通过双相机和机器人状态同步录制 HDF5 示教数据
+- 提供 `Home`、`Home Zone`、控制器切换和录制服务接口
+- 支持模型加载、推理预览和推理动作执行
 
-## 项目定位
+## 工作区组成
 
-当前项目聚焦三件事：
+| 路径 | 作用 |
+| --- | --- |
+| `src/teleop_control_py/` | 主控 ROS 2 包，包含 GUI、控制、采集、推理桥接和配置 |
+| `src/Universal_Robots_ROS2_Driver/` | UR 官方 ROS 2 driver、controller 和 MoveIt 配置 |
+| `src/robotiq_2f_gripper_ros2/` | Robotiq 2F 夹爪相关 ROS 2 包 |
+| `src/qbsofthand_control/` | qbSoftHand 控制包 |
+| `Real_IL/` | 本地模仿学习推理仓库 |
+| `openpi/` | 远端 openpi 推理相关仓库 |
+| `scripts/` | workspace 级工具脚本 |
+| `data/` | 本地采集数据、预览录屏和推理日志 |
+| `models/` | 本地模型和权重目录 |
+| `udev/` | 设备规则 |
 
-- 通过 GUI 管理真实机器人控制链路
-- 录制严格同步的 HDF5 示教数据
-- 在线加载 `Real_IL` 模型并执行推理动作
+## 架构概览
 
-当前默认组合：
+项目按入口、编排、核心运行、功能、设备与资产五层组织：
 
-- 机械臂：UR5 + MoveIt Servo
-- 输入：`joy` / `mediapipe` / `quest3`
-- 夹爪：`robotiq` 或 `qbsofthand`
-- 采集格式：HDF5
-- 主入口：GUI
+![teleop_control 项目框架图](docs/assets/teleop-control-framework.png)
 
-## 架构图
+主要职责：
 
-下面这张图是项目当前采用的顶层分层设计图。当前代码已经部分落地，真实落地情况以 `docs/PROJECT_ANALYSIS.md` 为准。
+- GUI 负责流程编排、状态显示和用户操作入口。
+- `core` 模块提供状态机、动作仲裁、同步采样、录制和推理生命周期管理。
+- `teleop_control_node` 处理人工输入并下发遥操作动作。
+- `robot_commander_node` 提供 `Home`、`Home Zone` 和控制器切换能力。
+- `data_collector_node` 负责相机采样、状态同步和 HDF5 写盘。
+- `ROS2Worker` 是 GUI 侧 ROS 桥接层，也承接推理执行链路。
 
-```mermaid
-flowchart TD
-    classDef ui fill:#e3f2fd,stroke:#1e88e5,stroke-width:2px,color:#000
-    classDef core fill:#fff3e0,stroke:#fb8c00,stroke-width:2px,color:#000
-    classDef backend fill:#e8f5e9,stroke:#43a047,stroke-width:2px,color:#000
-    classDef hw fill:#f3e5f5,stroke:#8e24aa,stroke-width:2px,color:#000
-
-    subgraph TaskLayer ["GUI / Task Layer"]
-        UI["GUI 主界面<br/>(只发意图，不碰硬件)"]:::ui
-        Editor["离线数据编辑器"]:::ui
-    end
-
-    subgraph CoreLayer ["Core Layer"]
-        Orchestrator["SystemOrchestrator / StateMachine<br/>(顶层协调器)"]:::core
-        MUX{"MUX<br/>(动作仲裁)"}:::core
-        SyncHub["SyncHub<br/>(统一采样时钟)"]:::core
-        Recorder["Recorder<br/>(录制器)"]:::core
-        Infer["InferenceService<br/>(推理服务)"]:::core
-        Commander["Commander / SafetyManager<br/>(Home / HomeZone / E-Stop)"]:::core
-
-        subgraph DeviceManager ["DeviceManager / Adapters"]
-            direction LR
-            InBE["InputBackend"]:::backend
-            ArmBE["ArmBackend"]:::backend
-            GripBE["GripperBackend"]:::backend
-            CamBE["CameraBackend"]:::backend
-        end
-    end
-
-    subgraph HardwareLayer ["Hardware Layer"]
-        direction LR
-        JoyHW["Joy / MediaPipe"]:::hw
-        RobotHW["UR5 / Franka / Aubo<br/>(官方驱动 + MoveIt Servo)"]:::hw
-        GripHW["Robotiq / qbSoftHand"]:::hw
-        CamHW["RealSense / OAK-D<br/>(SDK / SHM)"]:::hw
-    end
-
-    UI --> Orchestrator
-    Orchestrator --> MUX
-    Orchestrator --> Recorder
-    Orchestrator --> Infer
-    Orchestrator --> SyncHub
-    Orchestrator --> Commander
-
-    InBE -->|"ActionCommand"| MUX
-    Infer -->|"ActionCommand"| MUX
-    Commander -->|"高优先级控制"| MUX
-
-    MUX -->|"send_delta_twist()"| ArmBE
-    MUX -->|"set_gripper()"| GripBE
-
-    SyncHub -->|"观测快照"| Recorder
-    SyncHub -->|"观测快照"| Infer
-    SyncHub -->|"get_joint_state()/get_tcp_pose()"| ArmBE
-    SyncHub -->|"get_state()"| GripBE
-    SyncHub -->|"get_frame()"| CamBE
-
-    InBE -.-> JoyHW
-    ArmBE -.-> RobotHW
-    GripBE -.-> GripHW
-    CamBE -.-> CamHW
-```
-
-当前实现上的几个关键事实：
-
-- `teleop_control_node` 负责人工遥操作闭环。
-- `robot_commander_node` 负责 `Home / Home Zone / controller switch`。
-- `data_collector_node` 负责双相机采样、状态同步和 HDF5 录制。
-- 推理执行当前仍通过 GUI 侧 `ROS2Worker` 桥接下发。
-- `robot_profiles.yaml` 已经成为底层接口默认值主真源。
+更完整的职责边界和运行链路见 [docs/guide/01-architecture.md](docs/guide/01-architecture.md)。
 
 ## 快速开始
 
-## 1. 环境前提
+### 环境前提
 
 建议环境：
 
@@ -115,45 +60,36 @@ flowchart TD
 - Python 3.10
 - 已安装 UR 驱动、MoveIt Servo、对应夹爪驱动
 
-`requirements.txt` 只覆盖源码态 Python 依赖，不包含 ROS 2 系统包，例如：
+`requirements.txt` 只包含本工作区的 Python 依赖。ROS 2 系统包请通过 ROS 2 / apt 安装。
 
-- `rclpy`
-- `cv_bridge`
-- `geometry_msgs`
-- `sensor_msgs`
-- `controller_manager_msgs`
-
-这些依赖应通过 ROS 2 / apt 安装。
-
-## 2. 安装 Python 依赖
-
-基础运行依赖：
+### 安装依赖
 
 ```bash
 pip install -r requirements.txt
 ```
 
-如果你需要在线推理 `Real_IL`，请先将仓库拉到当前项目根目录，并保持目录名为 `Real_IL`：
+如果需要使用 `Real_IL` 推理，请将仓库放在当前项目根目录，并保持目录名为 `Real_IL`：
 
 ```bash
 git clone https://github.com/niconekomimi/Real_IL.git Real_IL
-```
-
-然后安装其依赖：
-
-```bash
 pip install -r Real_IL/requirements.txt
 ```
 
-## 3. 编译工作区
+### 编译
 
 ```bash
 source /opt/ros/humble/setup.bash
-colcon build --packages-select teleop_control_py
+colcon build
 source install/setup.bash
 ```
 
-## 4. 启动 GUI
+日常只改主控包时，也可以只编译 `teleop_control_py`：
+
+```bash
+colcon build --packages-select teleop_control_py
+```
+
+### 启动 GUI
 
 推荐入口：
 
@@ -161,11 +97,9 @@ source install/setup.bash
 ros2 run teleop_control_py teleop_gui
 ```
 
-![GUI 界面预览](GUI.png)
+![GUI 界面预览](docs/assets/gui-preview.png)
 
 ## GUI 推荐工作流
-
-推荐顺序：
 
 1. 在 GUI 里选择 `ur_type`、机器人 IP、输入后端、夹爪类型
 2. 如果选择 `quest3`，先确认 Quest bridge 已运行，并在 Quest 头显中打开对应网页后点击进入 `VR` 模式
@@ -176,65 +110,24 @@ ros2 run teleop_control_py teleop_gui
 7. 根据需要执行 `Go Home` / `Go Home Zone` / `设当前姿态为 Home`
 8. 需要模型执行时，启动推理并再单独使能推理执行
 
-当前 GUI 负责：
-
-- 机械臂驱动进程管理
-- 遥操作系统进程管理
-- 采集节点进程管理
-- 推理生命周期与执行开关
-- 实时状态展示
-- 相机与录制配置选择
-- Home 点持久化覆盖
-
 ## 命令行入口
 
-## 启动整套控制系统
+启动整套控制系统：
 
 ```bash
 ros2 launch teleop_control_py control_system.launch.py
 ```
 
-常用示例：
-
-手柄 + Robotiq：
+常用参数组合：
 
 ```bash
-ros2 launch teleop_control_py control_system.launch.py \
-    input_type:=joy \
-    gripper_type:=robotiq \
-    robotiq_serial_port:=/dev/robotiq_gripper
+ros2 launch teleop_control_py control_system.launch.py input_type:=joy gripper_type:=robotiq
+ros2 launch teleop_control_py control_system.launch.py input_type:=joy gripper_type:=qbsofthand
+ros2 launch teleop_control_py control_system.launch.py input_type:=mediapipe gripper_type:=robotiq
+ros2 launch teleop_control_py control_system.launch.py input_type:=quest3 gripper_type:=robotiq
 ```
 
-手柄 + qbSoftHand：
-
-```bash
-ros2 launch teleop_control_py control_system.launch.py \
-    input_type:=joy \
-    gripper_type:=qbsofthand
-```
-
-MediaPipe + Robotiq：
-
-```bash
-ros2 launch teleop_control_py control_system.launch.py \
-    input_type:=mediapipe \
-    gripper_type:=robotiq
-```
-
-Quest3 + Robotiq：
-
-```bash
-ros2 launch teleop_control_py control_system.launch.py \
-    input_type:=quest3 \
-    gripper_type:=robotiq
-```
-
-说明：
-
-- `input_type:=quest3` 时，`control_system.launch.py` 默认会自动启动 `quest3_webxr_bridge_node`
-- Quest 侧推荐入口见 [docs/current_control_behavior_spec_v0.1.md](docs/current_control_behavior_spec_v0.1.md)
-
-整套系统 + 采集节点：
+同时启动采集节点：
 
 ```bash
 ros2 launch teleop_control_py control_system.launch.py \
@@ -245,10 +138,10 @@ ros2 launch teleop_control_py control_system.launch.py \
 
 更多分离启动、参数调试和 Quest3 专项说明见：
 
-- [docs/PROJECT_ANALYSIS.md](docs/PROJECT_ANALYSIS.md)
-- [docs/current_control_behavior_spec_v0.1.md](docs/current_control_behavior_spec_v0.1.md)
+- [docs/guide/03-operation.md](docs/guide/03-operation.md)
+- [docs/guide/07-devices.md](docs/guide/07-devices.md)
 
-## 单独启动采集节点
+单独启动采集节点：
 
 ```bash
 ros2 run teleop_control_py data_collector_node \
@@ -256,7 +149,7 @@ ros2 run teleop_control_py data_collector_node \
     --params-file src/teleop_control_py/config/data_collector_params.yaml
 ```
 
-常用服务：
+## 常用服务
 
 ```bash
 ros2 service call /data_collector/start std_srvs/srv/Trigger {}
@@ -266,67 +159,44 @@ ros2 service call /commander/go_home std_srvs/srv/Trigger {}
 ros2 service call /commander/go_home_zone std_srvs/srv/Trigger {}
 ```
 
-## 当前系统行为摘要
+## 可复现程度
 
-当前代码的关键行为：
+这是一个面向真实硬件的机器人工作区。代码、launch 参数、配置结构和文档可以直接阅读和复用；完整运行需要对应硬件和本地环境。
 
-- `teleop` 与 `inference execution` 当前互斥
-- `Home / Home Zone` 高于遥操作
-- 如果 GUI 当前正在执行推理，发起 `Home / Home Zone` 时会先停止推理执行
-- `quest3` 当前已经接入为正式输入后端，不再只是 bridge 原型
-- `quest3` 默认采用 `relative pose + clutch + hand_relative orientation`，输入层默认关闭低通滤波
-- `quest3` 支持 Quest2ROS 风格的相对 frame 重置，默认只作用于 `active_hand`
-- `Home` 通过 trajectory controller 执行
-- `Home Zone` 通过 trajectory controller 直接移动到 Home 附近采样出的目标关节位姿
-- `Home Zone` 不会被新的人工输入自动取消
-- 录制主链路使用 SDK 相机主动拉帧，不以 ROS 图像 topic 为主采样路径
+需要真实硬件或现场环境的部分：
 
-## 配置文件分工
+- UR 机械臂、UR driver 网络配置和 MoveIt Servo 控制链路
+- Robotiq 或 qbSoftHand 夹爪
+- RealSense / OAK-D 相机
+- Quest 3 WebXR 输入
+- 本地模型权重、示教数据和机器人现场 IP / 设备序列号
 
-| 文件 | 作用 |
-| --- | --- |
-| `src/teleop_control_py/config/robot_profiles.yaml` | 底层机械臂 / 夹爪 / ROS 接口默认值真源 |
-| `src/teleop_control_py/config/teleop_params.yaml` | 遥操作行为配置；同时包含 Quest3 bridge 默认参数 |
-| `src/teleop_control_py/config/data_collector_params.yaml` | 采集行为配置 |
-| `src/teleop_control_py/config/gui_params.yaml` | GUI 默认值和上次选择 |
-| `src/teleop_control_py/config/home_overrides.yaml` | 运行期 Home 点覆盖 |
-| `src/teleop_control_py/config/joy_driver_params.yaml` | 手柄驱动层配置 |
+可以脱离硬件阅读或复用的部分：
 
-## 数据格式
+- GUI、launch、ROS 节点和模块边界
+- `SystemOrchestrator`、`ControlCoordinator`、`ActionMux` 控制规则设计
+- HDF5 数据采集链路和数据结构说明
+- `Real_IL` / `openpi` 推理后端接入方式
+- `docs/guide/` 中的架构、运行和配置说明
 
-当前 HDF5 以 `data/demo_N` 组织，典型字段包括：
+第三方依赖说明：
 
-- `obs/agentview_rgb`
-- `obs/eye_in_hand_rgb`
-- `obs/robot0_joint_pos`
-- `obs/robot0_gripper_qpos`
-- `obs/robot0_eef_pos`
-- `obs/robot0_eef_quat`
-- `actions`
+- `Real_IL/` 和 `openpi/` 作为外部模型仓库在本地单独获取，不随本仓库提交。
+- `data/`、`models/`、`build/`、`install/`、`log/` 等本地运行产物不作为源码发布。
+- README 中的启动命令面向真实硬件环境，运行前需要按自己的机器人 IP、相机序列号、夹爪设备和模型路径调整配置。
 
-当前 `actions` 的语义是命令动作：
+## 文档
 
-```text
-[vx, vy, vz, wx, wy, wz, gripper]
-```
+正式项目文档和维护上下文分开维护：
 
-其中：
+- [docs/guide/00-overview.md](docs/guide/00-overview.md)：workspace 概览和文档阅读顺序
+- [docs/guide/01-architecture.md](docs/guide/01-architecture.md)：架构分层和运行边界
+- [docs/guide/03-operation.md](docs/guide/03-operation.md)：GUI 与命令行启动方式
+- [docs/guide/08-configuration.md](docs/guide/08-configuration.md)：配置文件职责和覆盖规则
+- [docs/agent/00-current-state.md](docs/agent/00-current-state.md)：当前维护状态
+- [docs/agent/01-todo.md](docs/agent/01-todo.md)：人工和 AI 共用的任务队列
 
-- 前 3 维是末端线速度命令
-- 中间 3 维是末端角速度命令
-- 最后 1 维是夹爪命令
-
-## 常用脚本
-
-| 脚本 | 作用 |
-| --- | --- |
-| `scripts/teleop_gui.py` | 源码态启动 GUI |
-| `scripts/downsample_hdf5.py` | 对 HDF5 数据集做降采样 |
-| `scripts/rebuild_dataset_schema.py` | 重建已有 HDF5 数据集结构 |
-
-## 项目结构
-
-关键路径：
+## 关键路径
 
 - `src/teleop_control_py/launch/control_system.launch.py`
 - `src/teleop_control_py/launch/teleop_control.launch.py`
@@ -334,13 +204,9 @@ ros2 service call /commander/go_home_zone std_srvs/srv/Trigger {}
 - `src/teleop_control_py/teleop_control_py/core/`
 - `src/teleop_control_py/teleop_control_py/gui/`
 - `src/teleop_control_py/teleop_control_py/nodes/`
+- `src/Universal_Robots_ROS2_Driver/`
+- `src/robotiq_2f_gripper_ros2/`
+- `src/qbsofthand_control/`
 - `scripts/`
 - `Real_IL/`
-
-## 补充说明
-
-- 根目录 `requirements.txt` 只面向当前工作区 Python 依赖。
-- `Real_IL` 自身依赖在 `Real_IL/requirements.txt` 中单独维护。
-- 如果你要看当前真实职责边界和状态机行为，不要只看 README，直接看：
-  - [docs/PROJECT_ANALYSIS.md](docs/PROJECT_ANALYSIS.md)
-  - [docs/current_control_behavior_spec_v0.1.md](docs/current_control_behavior_spec_v0.1.md)
+- `openpi/`

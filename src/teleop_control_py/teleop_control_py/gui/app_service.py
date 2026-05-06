@@ -308,6 +308,8 @@ class GuiAppService:
         wrist_camera_source: str,
         device: str,
         control_hz: float,
+        backend_name: str = "real_il",
+        metadata_overrides: Optional[dict[str, object]] = None,
     ) -> Path:
         session = self._inference_action_logger.start(
             checkpoint_dir=checkpoint_dir,
@@ -318,6 +320,8 @@ class GuiAppService:
             wrist_camera_source=wrist_camera_source,
             device=device,
             control_hz=float(control_hz),
+            backend_name=backend_name,
+            metadata_overrides=metadata_overrides,
         )
         return session.csv_path
 

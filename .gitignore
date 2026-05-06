@@ -11,9 +11,16 @@ log/
 .coverage
 htmlcov/
 Real_IL/
+openpi/
 scripts/benchmark_real_robot_replan.py
 scripts/measure_teleop_latency.py
 scripts/plot_jump_spike_summary.py
+*.hdf5
+*.h5
+*.mp4
+*.pth
+*.pt
+*.onnx
 data/*
 !data/.gitkeep
 !data/preview_recordings/
@@ -26,3 +33,4 @@ models/*
 __pycache__/
 *.py[cod]
 test.md
+private/
