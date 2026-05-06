@@ -2,107 +2,58 @@
 
 [中文](README.md) | English
 
-This workspace targets real-robot teleoperation, dataset collection, and online inference. The recommended entry point is the GUI, which manages the robot driver, teleop stack, collector, and inference lifecycle.
+[![Imitation-learning robot architecture demo](https://i1.hdslb.com/bfs/archive/1d983e799dbbca97152156ce0755d5a8ef2fb6ce.jpg)](https://www.bilibili.com/video/BV13iQuB3E5L/)
 
-For the code-accurate architecture and behavior:
+> Demo video: click the cover image to open Bilibili.
 
-- [docs/PROJECT_ANALYSIS_EN.md](docs/PROJECT_ANALYSIS_EN.md)
-- [docs/current_control_behavior_spec_v0.1_EN.md](docs/current_control_behavior_spec_v0.1_EN.md)
+This is a ROS 2 workspace for real-robot teleoperation, dataset collection, and online inference. The project is organized around a GUI-driven workflow for bringing up the robot driver, teleop stack, HDF5 collector, preview pipeline, and model execution.
 
-## Overview
+The repository is maintained as a full workspace: `teleop_control_py` is the main control package, while the UR, Robotiq, qbSoftHand, `Real_IL`, `openpi`, script, model, and data directories are part of the daily runtime environment.
 
-Current focus:
+## Features
 
-- GUI-driven control of a real robot system
+- GUI-managed robot driver, teleop, collector, and inference lifecycle
+- `joy`, `mediapipe`, and `quest3` input backends
+- `robotiq` and `qbsofthand` gripper configurations
 - Synchronized HDF5 demo recording
-- Online `Real_IL` inference execution
+- `Home`, `Home Zone`, controller switching, and recording services
+- Model loading, inference preview, and inference action execution
 
-Current default stack:
+## Workspace Layout
 
-- Robot arm: UR5 + MoveIt Servo
-- Input: `joy` / `mediapipe` / `quest3`
-- Gripper: `robotiq` or `qbsofthand`
-- Dataset format: HDF5
-- Main entry: GUI
+| Path | Role |
+| --- | --- |
+| `src/teleop_control_py/` | Main ROS 2 package for the GUI, control, collection, inference bridge, and configuration |
+| `src/Universal_Robots_ROS2_Driver/` | UR ROS 2 driver, controllers, and MoveIt configuration |
+| `src/robotiq_2f_gripper_ros2/` | Robotiq 2F gripper ROS 2 packages |
+| `src/qbsofthand_control/` | qbSoftHand control package |
+| `Real_IL/` | Local imitation-learning inference repository |
+| `openpi/` | Remote openpi inference repository |
+| `scripts/` | Workspace-level utility scripts |
+| `data/` | Local datasets, preview recordings, and inference logs |
+| `models/` | Local models and checkpoints |
+| `udev/` | Device rules |
 
-## Architecture
+## Architecture Overview
 
-The following Mermaid diagram is the intended top-level architecture used by the project. The current implementation has already landed a large part of it, while some runtime responsibilities are still split across ROS nodes and the GUI bridge.
+The workspace is organized into entry, orchestration, core runtime, capability, and device/asset layers:
 
-```mermaid
-flowchart TD
-    classDef ui fill:#e3f2fd,stroke:#1e88e5,stroke-width:2px,color:#000
-    classDef core fill:#fff3e0,stroke:#fb8c00,stroke-width:2px,color:#000
-    classDef backend fill:#e8f5e9,stroke:#43a047,stroke-width:2px,color:#000
-    classDef hw fill:#f3e5f5,stroke:#8e24aa,stroke-width:2px,color:#000
+![teleop_control framework](docs/assets/teleop-control-framework.png)
 
-    subgraph TaskLayer ["GUI / Task Layer"]
-        UI["GUI Main Window<br/>(intent only)"]:::ui
-        Editor["Offline Dataset Editor"]:::ui
-    end
+Main responsibilities:
 
-    subgraph CoreLayer ["Core Layer"]
-        Orchestrator["SystemOrchestrator / StateMachine"]:::core
-        MUX{"MUX"}:::core
-        SyncHub["SyncHub"]:::core
-        Recorder["Recorder"]:::core
-        Infer["InferenceService"]:::core
-        Commander["Commander / SafetyManager"]:::core
+- The GUI owns workflow orchestration, status display, and user-facing controls.
+- The `core` package provides the state machine, action arbitration, synchronized capture, recording, and inference lifecycle services.
+- `teleop_control_node` consumes manual input and sends teleop actions.
+- `robot_commander_node` provides `Home`, `Home Zone`, and controller switching.
+- `data_collector_node` owns camera capture, robot-state synchronization, and HDF5 writing.
+- `ROS2Worker` bridges the GUI to ROS and also carries the inference execution path.
 
-        subgraph DeviceManager ["DeviceManager / Adapters"]
-            direction LR
-            InBE["InputBackend"]:::backend
-            ArmBE["ArmBackend"]:::backend
-            GripBE["GripperBackend"]:::backend
-            CamBE["CameraBackend"]:::backend
-        end
-    end
-
-    subgraph HardwareLayer ["Hardware Layer"]
-        direction LR
-        JoyHW["Joy / MediaPipe"]:::hw
-        RobotHW["UR5 / Franka / Aubo<br/>(Driver + MoveIt Servo)"]:::hw
-        GripHW["Robotiq / qbSoftHand"]:::hw
-        CamHW["RealSense / OAK-D<br/>(SDK / SHM)"]:::hw
-    end
-
-    UI --> Orchestrator
-    Orchestrator --> MUX
-    Orchestrator --> Recorder
-    Orchestrator --> Infer
-    Orchestrator --> SyncHub
-    Orchestrator --> Commander
-
-    InBE -->|"ActionCommand"| MUX
-    Infer -->|"ActionCommand"| MUX
-    Commander -->|"High-priority control"| MUX
-
-    MUX -->|"send_delta_twist()"| ArmBE
-    MUX -->|"set_gripper()"| GripBE
-
-    SyncHub -->|"Observation snapshot"| Recorder
-    SyncHub -->|"Observation snapshot"| Infer
-    SyncHub -->|"robot state"| ArmBE
-    SyncHub -->|"gripper state"| GripBE
-    SyncHub -->|"camera frame"| CamBE
-
-    InBE -.-> JoyHW
-    ArmBE -.-> RobotHW
-    GripBE -.-> GripHW
-    CamBE -.-> CamHW
-```
-
-Implementation notes:
-
-- `teleop_control_node` owns the manual teleop loop.
-- `robot_commander_node` owns `Home / Home Zone / controller switch`.
-- `data_collector_node` owns synchronized capture and HDF5 recording.
-- Inference execution is still bridged by GUI-side `ROS2Worker`.
-- `robot_profiles.yaml` is already the main source of default low-level interface values.
+For the full architecture and runtime boundaries, see [docs/guide/01-architecture.md](docs/guide/01-architecture.md).
 
 ## Quick Start
 
-## 1. Prerequisites
+### Prerequisites
 
 Recommended environment:
 
@@ -111,37 +62,36 @@ Recommended environment:
 - Python 3.10
 - Installed UR driver, MoveIt Servo, and the matching gripper driver
 
-`requirements.txt` only covers Python packages for this workspace. ROS 2 packages such as `rclpy`, `cv_bridge`, `geometry_msgs`, and `sensor_msgs` must be installed from ROS 2 / apt.
+`requirements.txt` only covers Python packages for this workspace. Install ROS 2 system packages through ROS 2 / apt.
 
-## 2. Install Python dependencies
-
-Base workspace dependencies:
+### Install Dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-If you want online `Real_IL` inference, first clone the repository into the workspace root and keep the directory name as `Real_IL`:
+If you want to use `Real_IL` inference, clone it into the workspace root and keep the directory name as `Real_IL`:
 
 ```bash
 git clone https://github.com/niconekomimi/Real_IL.git Real_IL
-```
-
-Then install its dependencies:
-
-```bash
 pip install -r Real_IL/requirements.txt
 ```
 
-## 3. Build the workspace
+### Build
 
 ```bash
 source /opt/ros/humble/setup.bash
-colcon build --packages-select teleop_control_py
+colcon build
 source install/setup.bash
 ```
 
-## 4. Launch the GUI
+When changing only the main package, building just `teleop_control_py` is also useful:
+
+```bash
+colcon build --packages-select teleop_control_py
+```
+
+### Launch The GUI
 
 Recommended entry:
 
@@ -149,7 +99,7 @@ Recommended entry:
 ros2 run teleop_control_py teleop_gui
 ```
 
-![GUI Preview](GUI.png)
+![GUI Preview](docs/assets/gui-preview.png)
 
 ## GUI Workflow
 
@@ -172,27 +122,30 @@ Launch the full control system:
 ros2 launch teleop_control_py control_system.launch.py
 ```
 
-Examples:
+Common parameter combinations:
 
 ```bash
 ros2 launch teleop_control_py control_system.launch.py input_type:=joy gripper_type:=robotiq
 ros2 launch teleop_control_py control_system.launch.py input_type:=joy gripper_type:=qbsofthand
 ros2 launch teleop_control_py control_system.launch.py input_type:=mediapipe gripper_type:=robotiq
 ros2 launch teleop_control_py control_system.launch.py input_type:=quest3 gripper_type:=robotiq
-ros2 launch teleop_control_py control_system.launch.py input_type:=joy gripper_type:=robotiq enable_data_collector:=true
 ```
 
-Notes:
+Start the collector with the full system:
 
-- When `input_type:=quest3`, `control_system.launch.py` will auto-start `quest3_webxr_bridge_node`
-- The recommended Quest entry URL and setup notes are documented in [docs/current_control_behavior_spec_v0.1_EN.md](docs/current_control_behavior_spec_v0.1_EN.md)
+```bash
+ros2 launch teleop_control_py control_system.launch.py \
+    input_type:=joy \
+    gripper_type:=robotiq \
+    enable_data_collector:=true
+```
 
-For Quest3-specific bringup details, split-launch workflows, and teleop mapping notes, see:
+For split-launch workflows, parameter tuning, and Quest3-specific notes, see:
 
-- [docs/PROJECT_ANALYSIS_EN.md](docs/PROJECT_ANALYSIS_EN.md)
-- [docs/current_control_behavior_spec_v0.1_EN.md](docs/current_control_behavior_spec_v0.1_EN.md)
+- [docs/guide/03-operation.md](docs/guide/03-operation.md)
+- [docs/guide/07-devices.md](docs/guide/07-devices.md)
 
-Collector-only launch:
+Launch only the collector node:
 
 ```bash
 ros2 run teleop_control_py data_collector_node \
@@ -200,7 +153,7 @@ ros2 run teleop_control_py data_collector_node \
     --params-file src/teleop_control_py/config/data_collector_params.yaml
 ```
 
-Useful services:
+## Useful Services
 
 ```bash
 ros2 service call /data_collector/start std_srvs/srv/Trigger {}
@@ -210,54 +163,54 @@ ros2 service call /commander/go_home std_srvs/srv/Trigger {}
 ros2 service call /commander/go_home_zone std_srvs/srv/Trigger {}
 ```
 
-## Config Responsibilities
+## Reproducibility Notes
 
-| File | Responsibility |
-| --- | --- |
-| `src/teleop_control_py/config/robot_profiles.yaml` | Default low-level robot / gripper / ROS interface truth |
-| `src/teleop_control_py/config/teleop_params.yaml` | Teleop behavior; also contains default Quest3 bridge parameters |
-| `src/teleop_control_py/config/data_collector_params.yaml` | Collection behavior |
-| `src/teleop_control_py/config/gui_params.yaml` | GUI defaults and persisted user choices |
-| `src/teleop_control_py/config/home_overrides.yaml` | Runtime Home overrides |
-| `src/teleop_control_py/config/joy_driver_params.yaml` | Joystick driver config |
+This is a real-hardware robotics workspace. The code, launch files, configuration layout, and documentation are readable and reusable, while a full run requires matching hardware and local setup.
 
-## Current Behavior Summary
+Parts that require real hardware or a lab environment:
 
-Key current behavior:
+- UR robot, UR driver networking, and MoveIt Servo control
+- Robotiq or qbSoftHand gripper
+- RealSense / OAK-D cameras
+- Quest 3 WebXR input
+- Local model checkpoints, demo datasets, robot IPs, and device serial numbers
 
-- `teleop` and `inference execution` are mutually exclusive
-- `Home / Home Zone` has higher priority than manual teleop
-- If GUI-side inference execution is active, `Go Home / Go Home Zone` will stop inference execution first
-- `quest3` is now a formal input backend, not just a bridge prototype
-- `quest3` defaults to `relative pose + clutch + hand_relative orientation`, with input smoothing disabled by default
-- `quest3` supports Quest2ROS-style relative frame reset, scoped to `active_hand` by default
-- `Home` uses the trajectory controller
-- `Home Zone` moves through the trajectory controller directly to a sampled target joint state near Home
-- `Home Zone` is not automatically canceled by new manual input
-- The collector uses SDK camera pulling as the primary recording path rather than ROS image topics
+Parts that can be reviewed or reused without hardware:
 
-## Dataset Format
+- GUI, launch files, ROS nodes, and module boundaries
+- `SystemOrchestrator`, `ControlCoordinator`, and `ActionMux` control-rule design
+- HDF5 collection pipeline and dataset structure notes
+- `Real_IL` / `openpi` inference backend integration
+- Architecture, operation, and configuration docs under `docs/guide/`
 
-HDF5 demos are stored under `data/demo_N`, with fields such as:
+Third-party dependency notes:
 
-- `obs/agentview_rgb`
-- `obs/eye_in_hand_rgb`
-- `obs/robot0_joint_pos`
-- `obs/robot0_gripper_qpos`
-- `obs/robot0_eef_pos`
-- `obs/robot0_eef_quat`
-- `actions`
+- `Real_IL/` and `openpi/` are external model repositories and should be fetched locally; they are not committed into this repository.
+- `data/`, `models/`, `build/`, `install/`, and `log/` are local runtime artifacts, not source release content.
+- README commands target a real-hardware environment. Before running them, adjust robot IPs, camera serial numbers, gripper devices, and model paths for your setup.
 
-Current action semantics:
+## Documentation
 
-```text
-[vx, vy, vz, wx, wy, wz, gripper]
-```
+Detailed maintenance docs are under `docs/`. They are currently maintained in Chinese:
 
-## Useful Scripts
+- [docs/guide/00-overview.md](docs/guide/00-overview.md): workspace overview and reading order
+- [docs/guide/01-architecture.md](docs/guide/01-architecture.md): architecture layers and runtime boundaries
+- [docs/guide/03-operation.md](docs/guide/03-operation.md): GUI and CLI startup workflows
+- [docs/guide/08-configuration.md](docs/guide/08-configuration.md): configuration ownership and override rules
+- [docs/agent/00-current-state.md](docs/agent/00-current-state.md): current maintenance state
+- [docs/agent/01-todo.md](docs/agent/01-todo.md): shared human/AI task queue
 
-| Script | Purpose |
-| --- | --- |
-| `scripts/teleop_gui.py` | Run the GUI from source |
-| `scripts/downsample_hdf5.py` | Downsample an HDF5 dataset |
-| `scripts/rebuild_dataset_schema.py` | Rebuild an existing HDF5 dataset layout |
+## Key Paths
+
+- `src/teleop_control_py/launch/control_system.launch.py`
+- `src/teleop_control_py/launch/teleop_control.launch.py`
+- `src/teleop_control_py/config/`
+- `src/teleop_control_py/teleop_control_py/core/`
+- `src/teleop_control_py/teleop_control_py/gui/`
+- `src/teleop_control_py/teleop_control_py/nodes/`
+- `src/Universal_Robots_ROS2_Driver/`
+- `src/robotiq_2f_gripper_ros2/`
+- `src/qbsofthand_control/`
+- `scripts/`
+- `Real_IL/`
+- `openpi/`

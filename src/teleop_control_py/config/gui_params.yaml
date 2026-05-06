@@ -31,10 +31,10 @@ teleop_gui:
     default_inference_wrist_camera_source: oakd
     default_inference_wrist_camera_model: oakd
     default_inference_wrist_camera_serial_number: 1944301081F3181300
-    default_inference_model_dir: /home/rvl/collect_datasets_ws/models/10-07-25
-    default_inference_env: fruits
-    default_inference_task: pick_up_the_orange_and_place_it_in_the_basket
-    default_inference_embedding_path: /home/rvl/collect_datasets_ws/Real_IL/task_embeddings/data_fruits.pkl
+    default_inference_model_dir: /home/rvl/collect_datasets_ws/models/drawer/04-46-18
+    default_inference_env: drawer
+    default_inference_task: store_the_white_cup_in_the_bottom_drawer
+    default_inference_embedding_path: /home/rvl/collect_datasets_ws/Real_IL/task_embeddings/data_drawer.pkl
     default_inference_device: cuda
     default_inference_hz: 10.0
     collect_inference_action_logs: false
@@ -48,3 +48,7 @@ teleop_gui:
     oakd_enable_depth: false
     default_hdf5_output_dir: /home/rvl/collect_datasets_ws/data
     default_hdf5_filename: nsy1.hdf5
+    default_inference_backend: openpi_remote
+    default_openpi_host: 127.0.0.1
+    default_openpi_port: 18000
+    default_openpi_prompt: pick up the red apple and place it in the basket

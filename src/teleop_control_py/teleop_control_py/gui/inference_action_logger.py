@@ -181,15 +181,19 @@ class InferenceActionLogger:
         wrist_camera_source: str,
         device: str,
         control_hz: float,
+        backend_name: str = "real_il",
+        metadata_overrides: Optional[dict[str, object]] = None,
     ) -> InferenceActionLogSession:
         self.close()
 
         timestamp = datetime.now().astimezone()
-        resolved_checkpoint_dir = Path(checkpoint_dir).expanduser().resolve()
+        checkpoint_text = str(checkpoint_dir).strip()
+        embedding_text = str(task_embedding_path).strip()
+        resolved_checkpoint_dir = Path(checkpoint_text).expanduser().resolve() if checkpoint_text else None
         session_name = (
             f"{timestamp:%Y%m%d_%H%M%S}_"
             f"{_sanitize_fragment(task_name, 'task')}_"
-            f"{_sanitize_fragment(resolved_checkpoint_dir.name, 'model')}"
+            f"{_sanitize_fragment((resolved_checkpoint_dir.name if resolved_checkpoint_dir is not None else backend_name), 'model')}"
         )
         session_dir = self._output_root / session_name
         session_dir.mkdir(parents=True, exist_ok=True)
@@ -240,9 +244,10 @@ class InferenceActionLogger:
 
         self._metadata = {
             "created_at_iso": timestamp.isoformat(timespec="seconds"),
-            "checkpoint_dir": str(resolved_checkpoint_dir),
+            "backend_name": str(backend_name).strip() or "real_il",
+            "checkpoint_dir": str(resolved_checkpoint_dir) if resolved_checkpoint_dir is not None else "",
             "task_name": str(task_name),
-            "task_embedding_path": str(Path(task_embedding_path).expanduser().resolve()),
+            "task_embedding_path": str(Path(embedding_text).expanduser().resolve()) if embedding_text else "",
             "loop_hz": float(loop_hz),
             "control_hz": float(control_hz),
             "global_camera_source": str(global_camera_source),
@@ -250,7 +255,10 @@ class InferenceActionLogger:
             "device": str(device or "auto"),
             "steps_recorded": 0,
         }
-        self._metadata.update(_extract_checkpoint_policy_metadata(resolved_checkpoint_dir))
+        if resolved_checkpoint_dir is not None:
+            self._metadata.update(_extract_checkpoint_policy_metadata(resolved_checkpoint_dir))
+        if metadata_overrides:
+            self._metadata.update(dict(metadata_overrides))
         self._write_metadata()
 
         self._session = session
