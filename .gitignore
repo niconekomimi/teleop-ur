@@ -34,3 +34,5 @@ __pycache__/
 *.py[cod]
 test.md
 private/
+data505/wmw_rebuilt.zip
+data505/wk2_rebuilt.zip

@@ -102,3 +102,5 @@ ssh -N -p 8000 -L 18000:127.0.0.1:8000 ubuntu@10.99.16.20
 
 
 ```
+ssh -N -p 48567 -L 8000:127.0.0.1:9380 root@connect.westd.seetacloud.com
+asFN7K9Ifuk+

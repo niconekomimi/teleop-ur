@@ -18,7 +18,7 @@ quest3_webxr_bridge_node:
     # TLS proxy, put the public secure websocket URL here so the node can print
     # the full Quest browser entry URL:
     #   https://vuer.ai?ws=<public_wss_url>
-    public_wss_url: ""
+    public_wss_url: "192.168.137.227"
 
     # Optional custom TLS files. If left empty and auto_generate_self_signed_cert
     # is true, the node generates a local certificate automatically.

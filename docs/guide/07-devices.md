@@ -53,7 +53,7 @@
 | `mediapipe` | `MediaPipeInputHandler` | 基于手部追踪生成遥操作动作 |
 | `quest3` | `quest3_webxr_bridge_node`, `Quest3InputHandler` | 通过 Quest Browser WebXR 输入控制器位姿和按钮 |
 
-输入行为参数主要位于 `teleop_params.yaml`。GUI 只选择输入类型和常用参数，具体 topic、轴映射、clutch、限幅和滤波行为由配置文件和输入 handler 共同决定。
+输入行为参数主要位于 `teleop_params.yaml`。GUI 负责选择输入类型，也可以通过“遥操作设置”弹窗调整常用速度、加速度、轴/按钮映射、clutch 和滤波参数；自定义方案保存在 `gui_params.yaml` 的 `teleop_settings` 中，应用后的实际运行参数写回 `teleop_params.yaml`。
 
 ## Quest 3 WebXR
 
@@ -163,7 +163,8 @@ Quest 3 遥操作参数位于 `teleop_params.yaml`：
 
 ### Frame Reset
 
-Quest 3 支持类似 Quest2ROS 的相对 frame reset：
+Quest 3 支持类似 Quest2ROS 的相对 frame reset，但默认关闭。当前默认 `target_pose + clutch`
+模式下，每次按住 clutch 都会重新锚定相对位姿起点，因此 frame reset 通常不是必需操作。
 
 - `quest3_frame_reset_enabled`
 - `quest3_frame_reset_scope`
@@ -172,7 +173,7 @@ Quest 3 支持类似 Quest2ROS 的相对 frame reset：
 - `quest3_left_frame_reset_buttons`
 - `quest3_right_frame_reset_buttons`
 
-默认 `quest3_frame_reset_scope` 为 `active_hand`，只允许当前控制手触发 reset。
+启用后，默认 `quest3_frame_reset_scope` 为 `active_hand`，只允许当前控制手触发 reset。
 
 ## 维护注意事项
 

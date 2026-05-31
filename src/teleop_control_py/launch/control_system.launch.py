@@ -326,14 +326,19 @@ def _maybe_include_joy_driver(context, *args, **kwargs):
 	joy_launch_path = os.path.join(teleop_share, "launch", "joy_driver.launch.py")
 	joy_params_file = os.path.join(teleop_share, "config", "joy_driver_params.yaml")
 	actions.append(
-		IncludeLaunchDescription(
-			PythonLaunchDescriptionSource(joy_launch_path),
-			launch_arguments={
-				"params_file": joy_params_file,
-				"python_executable": LaunchConfiguration("python_executable"),
-				"profile": LaunchConfiguration("joy_profile"),
-				"device_path": LaunchConfiguration("joy_device_path"),
-			}.items(),
+		GroupAction(
+			scoped=True,
+			actions=[
+				IncludeLaunchDescription(
+					PythonLaunchDescriptionSource(joy_launch_path),
+					launch_arguments={
+						"params_file": joy_params_file,
+						"python_executable": LaunchConfiguration("python_executable"),
+						"profile": LaunchConfiguration("joy_profile"),
+						"device_path": LaunchConfiguration("joy_device_path"),
+					}.items(),
+				)
+			],
 		)
 	)
 	actions.append(LogInfo(msg="[control_system] Included teleop_control_py joy_driver.launch.py"))

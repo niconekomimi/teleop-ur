@@ -9,7 +9,7 @@ from pathlib import Path
 import re
 import struct
 import socket
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from ament_index_python.packages import PackageNotFoundError, get_package_share_directory
 
@@ -62,6 +62,7 @@ class GuiSettings:
     default_hdf5_filename: str
 
     home_joint_positions: List[float]
+    teleop_settings: Dict[str, object]
 
 
 @dataclass(frozen=True)
@@ -92,12 +93,25 @@ def get_repo_gui_config_path(current_file: str | Path) -> Path:
     return workspace_root / "src" / "teleop_control_py" / "config" / "gui_params.yaml"
 
 
+def get_repo_teleop_config_path(current_file: str | Path) -> Path:
+    workspace_root = _workspace_root_from_file(current_file)
+    return workspace_root / "src" / "teleop_control_py" / "config" / "teleop_params.yaml"
+
+
 def get_installed_gui_config_path() -> Optional[Path]:
     try:
         share_dir = Path(get_package_share_directory("teleop_control_py"))
     except PackageNotFoundError:
         return None
     return share_dir / "config" / "gui_params.yaml"
+
+
+def get_installed_teleop_config_path() -> Optional[Path]:
+    try:
+        share_dir = Path(get_package_share_directory("teleop_control_py"))
+    except PackageNotFoundError:
+        return None
+    return share_dir / "config" / "teleop_params.yaml"
 
 
 def get_repo_home_override_path(current_file: str | Path) -> Path:
@@ -227,6 +241,9 @@ def load_gui_settings(current_file: str | Path) -> GuiSettings:
             else "d435"
         )
 
+    teleop_settings_raw = raw.get("teleop_settings", {})
+    teleop_settings = dict(teleop_settings_raw) if isinstance(teleop_settings_raw, dict) else {}
+
     return GuiSettings(
         default_robot_ip=str(raw.get("default_robot_ip", "192.168.1.211")),
         default_reverse_ip=str(raw.get("default_reverse_ip", "192.168.1.10")),
@@ -296,6 +313,7 @@ def load_gui_settings(current_file: str | Path) -> GuiSettings:
         default_hdf5_output_dir=str(output_dir),
         default_hdf5_filename=str(raw.get("default_hdf5_filename", "libero_demos.hdf5")),
         home_joint_positions=[float(v) for v in raw.get("home_joint_positions", [])],
+        teleop_settings=teleop_settings,
     )
 
 
@@ -333,6 +351,86 @@ def save_gui_settings_overrides(current_file: str | Path, updates: Dict[str, obj
 
     for key, value in updates.items():
         params[key] = value
+
+    with open(config_path, "w", encoding="utf-8") as handle:
+        yaml.safe_dump(content, handle, sort_keys=False, allow_unicode=False)
+
+    return config_path
+
+
+def load_teleop_params(current_file: str | Path) -> Tuple[Dict[str, object], Dict[str, object]]:
+    try:
+        import yaml  # type: ignore
+    except Exception:
+        return {}, {}
+
+    candidate_paths = [get_repo_teleop_config_path(current_file)]
+    installed = get_installed_teleop_config_path()
+    if installed is not None:
+        candidate_paths.append(installed)
+
+    for path in candidate_paths:
+        if not path.exists():
+            continue
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                content = yaml.safe_load(handle) or {}
+        except Exception:
+            continue
+        if not isinstance(content, dict):
+            continue
+
+        teleop_block = content.get("teleop_control_node", {})
+        teleop_params = teleop_block.get("ros__parameters", {}) if isinstance(teleop_block, dict) else {}
+        moveit_block = content.get("moveit_servo", {})
+        moveit_params = moveit_block.get("ros__parameters", {}) if isinstance(moveit_block, dict) else {}
+        return (
+            dict(teleop_params) if isinstance(teleop_params, dict) else {},
+            dict(moveit_params) if isinstance(moveit_params, dict) else {},
+        )
+
+    return {}, {}
+
+
+def save_teleop_params_overrides(
+    current_file: str | Path,
+    teleop_updates: Dict[str, object],
+    moveit_updates: Optional[Dict[str, object]] = None,
+) -> Path:
+    import yaml  # type: ignore
+
+    config_path = get_repo_teleop_config_path(current_file)
+    if config_path.exists():
+        with open(config_path, "r", encoding="utf-8") as handle:
+            content = yaml.safe_load(handle) or {}
+    else:
+        content = {}
+
+    if not isinstance(content, dict):
+        content = {}
+
+    teleop_block = content.setdefault("teleop_control_node", {})
+    if not isinstance(teleop_block, dict):
+        teleop_block = {}
+        content["teleop_control_node"] = teleop_block
+    teleop_params = teleop_block.setdefault("ros__parameters", {})
+    if not isinstance(teleop_params, dict):
+        teleop_params = {}
+        teleop_block["ros__parameters"] = teleop_params
+    for key, value in teleop_updates.items():
+        teleop_params[str(key)] = value
+
+    if moveit_updates:
+        moveit_block = content.setdefault("moveit_servo", {})
+        if not isinstance(moveit_block, dict):
+            moveit_block = {}
+            content["moveit_servo"] = moveit_block
+        moveit_params = moveit_block.setdefault("ros__parameters", {})
+        if not isinstance(moveit_params, dict):
+            moveit_params = {}
+            moveit_block["ros__parameters"] = moveit_params
+        for key, value in moveit_updates.items():
+            moveit_params[str(key)] = value
 
     with open(config_path, "w", encoding="utf-8") as handle:
         yaml.safe_dump(content, handle, sort_keys=False, allow_unicode=False)
@@ -670,11 +768,13 @@ def build_robot_driver_command(
     resolved_profile = str(robot_profile).strip() if robot_profile is not None else ""
     if not resolved_profile:
         resolved_profile = robot_profile_name_from_ur_type(ur_type)
+    params_file = get_repo_teleop_config_path(__file__)
     return [
         "ros2",
         "launch",
         "teleop_control_py",
         "control_system.launch.py",
+        f"params_file:={params_file}",
         f"ur_type:={ur_type}",
         f"robot_profile:={resolved_profile}",
         f"robot_ip:={robot_ip}",
@@ -719,11 +819,13 @@ def build_teleop_command(
     resolved_gripper_type = str(gripper_type).strip() or "robotiq"
     resolved_joy_profile = str(joy_profile).strip() or "auto"
     resolved_mediapipe_input_topic = str(mediapipe_input_topic).strip() or "/camera/camera/color/image_raw"
+    params_file = get_repo_teleop_config_path(__file__)
     cmd = [
         "ros2",
         "launch",
         "teleop_control_py",
         "control_system.launch.py",
+        f"params_file:={params_file}",
         f"ur_type:={ur_type}",
         f"robot_profile:={resolved_profile}",
         f"robot_ip:={robot_ip}",

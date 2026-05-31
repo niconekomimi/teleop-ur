@@ -5,7 +5,7 @@ teleop_gui:
     ur_type: ur5
     default_input_type: joy
     default_gripper_type: robotiq
-    default_joy_profile: auto
+    default_joy_profile: xbox
     joy_profiles:
     - auto
     - xbox
@@ -23,32 +23,32 @@ teleop_gui:
     realsense_d455_serial_number: ''
     default_collector_global_camera_model: d455
     default_collector_global_camera_serial_number: '146222254305'
-    default_collector_wrist_camera_model: oakd
-    default_collector_wrist_camera_serial_number: 1944301081F3181300
+    default_collector_wrist_camera_model: d435
+    default_collector_wrist_camera_serial_number: '231522070265'
     default_inference_global_camera_source: realsense
     default_inference_global_camera_model: d455
     default_inference_global_camera_serial_number: '146222254305'
-    default_inference_wrist_camera_source: oakd
-    default_inference_wrist_camera_model: oakd
-    default_inference_wrist_camera_serial_number: 1944301081F3181300
-    default_inference_model_dir: /home/rvl/collect_datasets_ws/models/drawer/04-46-18
-    default_inference_env: drawer
-    default_inference_task: store_the_white_cup_in_the_bottom_drawer
-    default_inference_embedding_path: /home/rvl/collect_datasets_ws/Real_IL/task_embeddings/data_drawer.pkl
+    default_inference_wrist_camera_source: realsense
+    default_inference_wrist_camera_model: d455
+    default_inference_wrist_camera_serial_number: '146222254305'
+    default_inference_model_dir: /home/rvl/collect_datasets_ws/models/10-07-25
+    default_inference_env: fruits
+    default_inference_task: pick_up_the_starfruit_and_place_it_in_the_basket
+    default_inference_embedding_path: /home/rvl/collect_datasets_ws/Real_IL/task_embeddings/data_fruits.pkl
     default_inference_device: cuda
-    default_inference_hz: 10.0
+    default_inference_hz: 20.0
     collect_inference_action_logs: false
     camera_driver_options:
     - realsense
     - oakd
     default_camera_driver: realsense
     default_global_camera_source: realsense
-    default_wrist_camera_source: oakd
+    default_wrist_camera_source: realsense
     realsense_enable_depth: false
     oakd_enable_depth: false
-    default_hdf5_output_dir: /home/rvl/collect_datasets_ws/data
-    default_hdf5_filename: nsy1.hdf5
+    default_hdf5_output_dir: /home/rvl/collect_datasets_ws/data505
+    default_hdf5_filename: wk2.hdf5
     default_inference_backend: openpi_remote
     default_openpi_host: 127.0.0.1
     default_openpi_port: 18000
-    default_openpi_prompt: pick up the red apple and place it in the basket
+    default_openpi_prompt: put the apple into the blue box

@@ -37,11 +37,11 @@ teleop_control_node:
     # 当前系统还没有 turbo 档，这里先迁一版“保守常速 + 更细中段”的手感来试。
     max_linear_vel: 2.0
     max_angular_vel: 3.0
-    max_linear_accel: 6.0
+    max_linear_accel: 4.5
     max_angular_accel: 12.0
     # 松手后回零时使用的加速度倍率。
     # 越小回零越慢、更柔和；越大回零越快。1.0 表示和正常加速同样快。
-    zero_return_accel_scale: 3.0
+    zero_return_accel_scale: 0.65
 
     # ==========================================================
     # 3) Joy 手柄输入
@@ -50,7 +50,7 @@ teleop_control_node:
     input_watchdog_timeout_sec: 0.2
 
     # linear | cubic
-    joy_deadzone: 0.05
+    joy_deadzone: 0.08
     joy_curve: "cubic"
 
     joy_deadman_enabled: false
@@ -71,7 +71,7 @@ teleop_control_node:
     linear_z_trigger_release_deadzone: 0.99
     linear_z_trigger_snap_release_threshold: 0.99
     linear_z_trigger_snap_release_drop: 0.99
-    linear_z_zero_return_accel_scale: 9.0
+    linear_z_zero_return_accel_scale: 0.65
     linear_axis_sign: [-1.0, -1.0, 1.0]
 
     angular_x_axis: 3
@@ -96,7 +96,7 @@ teleop_control_node:
     quest3_joy_topic: "/quest3/input/joy"
     quest3_require_connected: true
     quest3_pose_timeout_sec: 0.3
-    quest3_active_hand: "left"
+    quest3_active_hand: "right"
     # Quest 控制器遥操作优先使用相对位姿 + clutch 的 target_pose 模式。
     # 这是比视觉手势更稳定的主流做法：按住 clutch 时记录手柄/机器人起点，
     # 再用手柄相对位姿持续驱动 TCP 目标位姿。
@@ -113,13 +113,14 @@ teleop_control_node:
     # 单次 clutch 期间允许的最大相对姿态偏转，超过后会被截断，避免大幅 wrist 翻转直接把目标姿态拉爆。
     quest3_max_relative_orientation_deg: 90.0
     quest3_linear_axis_mapping: [0, 2, 1]
-    # 旋转沿用当前 Quest3 已实测调顺的轴映射，避免大改坐标定义后再引入方向回归。
-    quest3_angular_axis_mapping: [1, 0, 2]
-    quest3_linear_axis_sign: [-1.0, 1.0, 1.0]
-    quest3_angular_axis_sign: [-1.0, -1.0, 1.0]
+    # 旋转镜像遥操作：保留 rx/ry 控制交换，反转 rx/ry，rz 保持不变。
+    quest3_angular_axis_mapping: [2, 0, 1]
+    # VR 镜像遥操作：前后/左右反向，上下保持不变。
+    quest3_linear_axis_sign: [1.0, -1.0, 1.0]
+    quest3_angular_axis_sign: [-1.0, -1.0, -1.0]
     quest3_orientation_mode: "hand_relative"
-    quest3_orientation_axis_mapping: [1, 0, 2]
-    quest3_orientation_axis_sign: [-1.0, -1.0, 1.0]
+    quest3_orientation_axis_mapping: [2, 0, 1]
+    quest3_orientation_axis_sign: [-1.0, -1.0, -1.0]
     # Quest 控制器本身 6DoF 跟踪已经很稳，默认不要再在输入层做低通，
     # 避免明显拖手。若后面只想抑制轻微抖动，再打开这个开关。
     quest3_enable_input_smoothing: false
@@ -127,7 +128,7 @@ teleop_control_node:
     # Quest2ROS 风格的相对 frame 重置。
     # 长按组合键后，把当前控制器姿态定义为新的相对参考系，
     # 后续 clutch / pose delta 都基于这个参考系解释。
-    quest3_frame_reset_enabled: true
+    quest3_frame_reset_enabled: false
     # active_hand: 只允许当前控制手做 frame reset；both: 左右手都可单独重置。
     quest3_frame_reset_scope: "active_hand"
     quest3_frame_reset_hold_sec: 0.75
@@ -211,6 +212,7 @@ teleop_control_node:
 # 用来覆盖 upstream ur_moveit_config 的默认 Servo 手感，而不修改外部库源码。
 moveit_servo:
   ros__parameters:
+    low_pass_filter_coeff: 10.0
     system_latency_compensation: 0.0
     low_latency_mode: false
 
@@ -240,7 +242,8 @@ quest3_webxr_bridge_node:
 
     # Quest 应访问本机的哪个局域网 IP。
     # 双网卡场景建议明确写成电脑 Wi-Fi 的 IPv4，避免误选到 UR5 有线网卡。
-    advertised_host: "192.168.137.227"
+    # advertised_host: "192.168.137.227"
+    advertised_host: "192.168.43.5"
 
     # 默认使用本地自签名证书，通过 https/wss 提供 WebXR。
     auto_generate_self_signed_cert: true

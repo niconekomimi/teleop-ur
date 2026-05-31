@@ -56,6 +56,8 @@
 
 `control_system.launch.py` 会从这里读取输入、夹爪、MoveIt Servo、Robotiq 和 Quest bridge 的默认值。
 
+GUI 的“遥操作设置”弹窗会把应用后的行为参数写回源码树里的 `teleop_params.yaml`。GUI 启动 teleop / robot driver 时会显式传入这个源码参数文件作为 `params_file`，因此调参后不需要重新 build；已经运行中的 `teleop_control_node` 不做热更新，重启遥操作系统后生效。
+
 ## `data_collector_params.yaml`
 
 这个文件描述“如何采集和写盘”。
@@ -87,6 +89,9 @@
 - HDF5 输出目录和默认文件名
 - 本地 `Real_IL` 推理默认路径
 - `openpi_remote` 的 host、port 和 prompt 默认值
+- `teleop_settings`：GUI 遥操作设置弹窗中的 joy / mediapipe / quest3 自定义方案、当前选中方案和默认方案
+
+`teleop_settings` 只保存 GUI 方案和选择状态；真正影响运行的速度、加速度、键位和滤波值仍以应用后写入的 `teleop_params.yaml` 为准。
 
 下面这些内容更适合放在机器人画像或行为配置中：
 

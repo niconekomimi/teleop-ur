@@ -12,7 +12,7 @@ data_collector:
     # 1) 输出与采样
     # ==========================================================
     output_path: "/home/rvl/collect_datasets_ws/data/libero_demos.hdf5"
-    record_fps: 10.0
+    record_fps: 20.0
     # <= 0 时关闭周期统计输出。
     stats_period_sec: 2.0
 
